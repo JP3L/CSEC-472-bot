@@ -4,8 +4,10 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time
 from typing import Dict, List, Optional
-from zoneinfo import ZoneInfo
-
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 import discord
 import pandas as pd
 from discord import app_commands
