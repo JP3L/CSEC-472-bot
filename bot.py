@@ -811,6 +811,13 @@ async def register(interaction: discord.Interaction, rit_username: str):
 
     DB.upsert_user(interaction.user.id, username)
 
+    
+    member = DATA.members_by_username[username]
+
+    await interaction.response.send_message(
+        f"Registered as `{member.username}` on `{member.team}`.",
+        ephemeral=True,
+        
     # Send any missed feedback to the newly registered user
 catchup_result = await interaction.client.catchup_handler.send_catchup_for_user(
     interaction.user.id,
@@ -826,13 +833,8 @@ if catchup_result['assignments_count'] > 0:
         await interaction.followup.send(
             f"⚠️ Found {catchup_result['assignments_count']} assignment(s) with feedback, but had trouble sending them: {catchup_result['error']}"
         )
-    
-    member = DATA.members_by_username[username]
-
-    await interaction.response.send_message(
-        f"Registered as `{member.username}` on `{member.team}`.",
-        ephemeral=True,
     )
+
 
 
 @bot.tree.command(name="username_help", description="Log a username mismatch for instructor review.")
@@ -840,6 +842,8 @@ if catchup_result['assignments_count'] > 0:
     claimed_username="The username you believe is correct",
     note="Optional note for the instructors"
 )
+
+
 async def username_help(interaction: discord.Interaction, claimed_username: str, note: Optional[str] = ""):
     DB.log_username_help(interaction.user.id, claimed_username, note or "")
     await interaction.response.send_message(
