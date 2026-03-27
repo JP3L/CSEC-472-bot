@@ -3,7 +3,7 @@ import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import aiohttp
 try:
     from zoneinfo import ZoneInfo
@@ -715,7 +715,7 @@ def choose_team_for_reviewer(discord_id: int, home_team: str) -> Optional[str]:
     return random.choice(least_reviewed)
 
 
-async def deliver_feedback(assignment_id: int) -> tuple[list[str], list[str]]:
+async def deliver_feedback(assignment_id: int) -> Tuple[List[str], List[str]]:
     row = DB.get_assignment(assignment_id)
     if row is None:
         return [], ["Assignment not found."]
