@@ -828,10 +828,10 @@ async def register(interaction: discord.Interaction, rit_username: str):
     )
 
     # Send any missed feedback to the newly registered user
-catchup_result = await DATA.catchup_handler.send_catchup_for_user(
-        interaction.user.id,
-        username
-    )
+    catchup_result = await DATA.catchup_handler.send_catchup_for_user(
+            interaction.user.id,
+            username
+        )
 
     if catchup_result['assignments_count'] > 0:
         if catchup_result['success']:
