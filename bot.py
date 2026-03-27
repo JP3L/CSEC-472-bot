@@ -13,6 +13,7 @@ import pandas as pd
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from catchup_handler import CatchupHandler
 
 load_dotenv()
 
@@ -73,7 +74,9 @@ class WorkbookData:
         self.assets_by_team: Dict[str, TeamAsset] = {}
         self.all_teams: List[str] = []
         self.load()
-
+        self.catchup_handler = CatchupHandler(self, DB)
+    
+    
     def load(self) -> None:
         mappings_df = pd.read_excel(self.path, sheet_name="Username-Team Mappings").fillna("")
         links_df = pd.read_excel(self.path, sheet_name="Assigned Team Links").fillna("")
@@ -807,6 +810,23 @@ async def register(interaction: discord.Interaction, rit_username: str):
         return
 
     DB.upsert_user(interaction.user.id, username)
+
+    # Send any missed feedback to the newly registered user
+catchup_result = await interaction.client.catchup_handler.send_catchup_for_user(
+    interaction.user.id,
+    username
+)
+
+if catchup_result['assignments_count'] > 0:
+    if catchup_result['success']:
+        await interaction.followup.send(
+            f"✅ Sent you {catchup_result['assignments_count']} assignment(s) of feedback you missed while unregistered!"
+        )
+    else:
+        await interaction.followup.send(
+            f"⚠️ Found {catchup_result['assignments_count']} assignment(s) with feedback, but had trouble sending them: {catchup_result['error']}"
+        )
+    
     member = DATA.members_by_username[username]
 
     await interaction.response.send_message(
