@@ -3,7 +3,7 @@ import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
