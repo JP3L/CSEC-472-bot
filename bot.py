@@ -66,61 +66,9 @@ class TeamAsset:
     wireframe_url: str
 
 
-class WorkbookData:
-    def __init__(self, path: str):
-        self.path = path
-        self.members_by_username: Dict[str, MemberRecord] = {}
-        self.members_by_team: Dict[str, List[MemberRecord]] = {}
-        self.assets_by_team: Dict[str, TeamAsset] = {}
-        self.all_teams: List[str] = []
-        self.load()
-        self.catchup_handler = CatchupHandler(self, DB)
-    
-    
-    def load(self) -> None:
-        mappings_df = pd.read_excel(self.path, sheet_name="Username-Team Mappings").fillna("")
-        links_df = pd.read_excel(self.path, sheet_name="Assigned Team Links").fillna("")
-
-        members_by_username: Dict[str, MemberRecord] = {}
-        members_by_team: Dict[str, List[MemberRecord]] = {}
-        assets_by_team: Dict[str, TeamAsset] = {}
-
-        for _, row in mappings_df.iterrows():
-            username = norm_username(row["Username"])
-            team = norm_team(row["Group Name"])
-            member = MemberRecord(
-                username=username,
-                team=team,
-                first_name=str(row["First Name"]).strip(),
-                last_name=str(row["Last Name"]).strip(),
-                email=str(row["Email Address"]).strip(),
-            )
-            members_by_username[username] = member
-            members_by_team.setdefault(team, []).append(member)
-
-        for _, row in links_df.iterrows():
-            team = norm_team(row["Assigned Team"])
-            asset = TeamAsset(
-                team=team,
-                video_url=str(row["Video Link"]).strip(),
-                wireframe_url=str(row["Wireframe PDF"]).strip(),
-            )
-            assets_by_team[team] = asset
-
-        missing_assets = sorted(set(members_by_team.keys()) - set(assets_by_team.keys()))
-        if missing_assets:
-            raise RuntimeError(
-                f"Workbook mismatch: these teams exist in tab 1 but not tab 2: {', '.join(missing_assets)}"
-            )
-
-        self.members_by_username = members_by_username
-        self.members_by_team = members_by_team
-        self.assets_by_team = assets_by_team
-        self.all_teams = sorted(assets_by_team.keys())
-
-DB = Database(DATABASE_FILE)
-DATA = WorkbookData(EXCEL_FILE)
-
+# ============================================================================
+# DATABASE CLASS - DEFINED FIRST (before instantiation and WorkbookData)
+# ============================================================================
 
 class Database:
     def __init__(self, path: str):
@@ -420,6 +368,68 @@ class Database:
             ORDER BY created_at DESC
             """
         ).fetchall()
+
+
+# ============================================================================
+# INSTANTIATE DATABASE AND WORKBOOK DATA (after Database class is defined)
+# ============================================================================
+
+DB = Database(DATABASE_FILE)
+
+
+class WorkbookData:
+    def __init__(self, path: str):
+        self.path = path
+        self.members_by_username: Dict[str, MemberRecord] = {}
+        self.members_by_team: Dict[str, List[MemberRecord]] = {}
+        self.assets_by_team: Dict[str, TeamAsset] = {}
+        self.all_teams: List[str] = []
+        self.load()
+        self.catchup_handler = CatchupHandler(self, DB)
+
+    def load(self) -> None:
+        mappings_df = pd.read_excel(self.path, sheet_name="Username-Team Mappings").fillna("")
+        links_df = pd.read_excel(self.path, sheet_name="Assigned Team Links").fillna("")
+
+        members_by_username: Dict[str, MemberRecord] = {}
+        members_by_team: Dict[str, List[MemberRecord]] = {}
+        assets_by_team: Dict[str, TeamAsset] = {}
+
+        for _, row in mappings_df.iterrows():
+            username = norm_username(row["Username"])
+            team = norm_team(row["Group Name"])
+            member = MemberRecord(
+                username=username,
+                team=team,
+                first_name=str(row["First Name"]).strip(),
+                last_name=str(row["Last Name"]).strip(),
+                email=str(row["Email Address"]).strip(),
+            )
+            members_by_username[username] = member
+            members_by_team.setdefault(team, []).append(member)
+
+        for _, row in links_df.iterrows():
+            team = norm_team(row["Assigned Team"])
+            asset = TeamAsset(
+                team=team,
+                video_url=str(row["Video Link"]).strip(),
+                wireframe_url=str(row["Wireframe PDF"]).strip(),
+            )
+            assets_by_team[team] = asset
+
+        missing_assets = sorted(set(members_by_team.keys()) - set(assets_by_team.keys()))
+        if missing_assets:
+            raise RuntimeError(
+                f"Workbook mismatch: these teams exist in tab 1 but not tab 2: {', '.join(missing_assets)}"
+            )
+
+        self.members_by_username = members_by_username
+        self.members_by_team = members_by_team
+        self.assets_by_team = assets_by_team
+        self.all_teams = sorted(assets_by_team.keys())
+
+
+DATA = WorkbookData(EXCEL_FILE)
 
 
 def parse_likert(value: str) -> int:
@@ -808,13 +818,13 @@ async def register(interaction: discord.Interaction, rit_username: str):
 
     DB.upsert_user(interaction.user.id, username)
 
-    
     member = DATA.members_by_username[username]
 
     await interaction.response.send_message(
         f"Registered as `{member.username}` on `{member.team}`.",
-        ephemeral=True,)
-        
+        ephemeral=True,
+    )
+
     # Send any missed feedback to the newly registered user
     catchup_result = await interaction.client.catchup_handler.send_catchup_for_user(
         interaction.user.id,
@@ -829,15 +839,14 @@ async def register(interaction: discord.Interaction, rit_username: str):
         else:
             await interaction.followup.send(
                 f"⚠️ Found {catchup_result['assignments_count']} assignment(s) with feedback, but had trouble sending them: {catchup_result['error']}"
-        )
-    
+            )
+
+
 @bot.tree.command(name="username_help", description="Log a username mismatch for instructor review.")
 @app_commands.describe(
     claimed_username="The username you believe is correct",
     note="Optional note for the instructors"
 )
-
-
 async def username_help(interaction: discord.Interaction, claimed_username: str, note: Optional[str] = ""):
     DB.log_username_help(interaction.user.id, claimed_username, note or "")
     await interaction.response.send_message(
