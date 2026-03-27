@@ -118,7 +118,7 @@ class WorkbookData:
         self.assets_by_team = assets_by_team
         self.all_teams = sorted(assets_by_team.keys())
 
-
+DB = Database(DATABASE_FILE)
 DATA = WorkbookData(EXCEL_FILE)
 
 
@@ -420,9 +420,6 @@ class Database:
             ORDER BY created_at DESC
             """
         ).fetchall()
-
-
-DB = Database(DATABASE_FILE)
 
 
 def parse_likert(value: str) -> int:
