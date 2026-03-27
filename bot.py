@@ -816,7 +816,7 @@ async def register(interaction: discord.Interaction, rit_username: str):
 
     await interaction.response.send_message(
         f"Registered as `{member.username}` on `{member.team}`.",
-        ephemeral=True,
+        ephemeral=True,)
         
     # Send any missed feedback to the newly registered user
 catchup_result = await interaction.client.catchup_handler.send_catchup_for_user(
