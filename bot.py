@@ -3,7 +3,8 @@ import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+import aiohttp
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -21,6 +22,7 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 GUILD_ID_RAW = os.getenv("DISCORD_GUILD_ID", "").strip()
 GUILD_ID = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
 INSTRUCTOR_CHANNEL_NAME = os.getenv("INSTRUCTOR_CHANNEL_NAME", "instructors").strip()
+DADJOKE_CHANNEL_NAME = os.getenv("DADJOKE_CHANNEL_NAME", "extracurricular").strip()
 EXCEL_FILE = os.getenv("EXCEL_FILE", "Teams-WireFrames.xlsx").strip()
 DATABASE_FILE = os.getenv("DATABASE_FILE", "peer_reviews.db").strip()
 REPORT_TIMEZONE = os.getenv("REPORT_TIMEZONE", "America/New_York").strip()
@@ -713,7 +715,7 @@ def choose_team_for_reviewer(discord_id: int, home_team: str) -> Optional[str]:
     return random.choice(least_reviewed)
 
 
-async def deliver_feedback(assignment_id: int) -> Tuple[List[str], List[str]]:
+async def deliver_feedback(assignment_id: int) -> tuple[list[str], list[str]]:
     row = DB.get_assignment(assignment_id)
     if row is None:
         return [], ["Assignment not found."]
@@ -976,6 +978,74 @@ async def send_daily_report_now(interaction: discord.Interaction):
 
     await channel.send(build_daily_report_text())
     await interaction.response.send_message("Instructor report sent.", ephemeral=True)
+
+
+@bot.tree.command(name="dadjoke", description="Post a random dad joke to #extracurricular.")
+async def dadjoke(interaction: discord.Interaction):
+    # Find the extracurricular channel
+    if GUILD_ID is None:
+        await interaction.response.send_message(
+            "Guild ID is not configured.",
+            ephemeral=True,
+        )
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        try:
+            guild = await bot.fetch_guild(GUILD_ID)
+        except discord.DiscordException:
+            await interaction.response.send_message(
+                "Could not find the server.",
+                ephemeral=True,
+            )
+            return
+
+    target_channel = None
+    for channel in guild.text_channels:
+        if channel.name == DADJOKE_CHANNEL_NAME:
+            target_channel = channel
+            break
+
+    if target_channel is None:
+        await interaction.response.send_message(
+            f"Could not find `#{DADJOKE_CHANNEL_NAME}` channel.",
+            ephemeral=True,
+        )
+        return
+
+    # Fetch a random dad joke from icanhazdadjoke.com
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": "AuthBot Discord Bot (https://github.com/JP3L/CSEC-472-bot)",
+            }
+            async with session.get("https://icanhazdadjoke.com/", headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.response.send_message(
+                        "Could not fetch a dad joke right now. Try again later.",
+                        ephemeral=True,
+                    )
+                    return
+                data = await resp.json()
+                joke = data.get("joke", "I ran out of dad jokes... that's no joke.")
+    except Exception as exc:
+        await interaction.response.send_message(
+            f"Error fetching dad joke: {exc}",
+            ephemeral=True,
+        )
+        return
+
+    # Post the joke to the extracurricular channel
+    await target_channel.send(f"**Dad Joke of the Moment**\n\n{joke}")
+
+    # Send ephemeral DM note to the user who called the command
+    await interaction.response.send_message(
+        f"I've pushed a dad joke to #{DADJOKE_CHANNEL_NAME}... everyone (well, maybe only some people) "
+        "likes a good dad joke but no one appreciates a channel spammer, so please use this with discretion.",
+        ephemeral=True,
+    )
 
 
 if __name__ == "__main__":
