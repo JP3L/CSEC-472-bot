@@ -1,8 +1,9 @@
+import json
 import os
 import random
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, time
+from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 import aiohttp
 try:
@@ -38,6 +39,212 @@ if not os.path.exists(EXCEL_FILE):
 GUILD_OBJECT = discord.Object(id=GUILD_ID) if GUILD_ID else None
 REPORT_TZ = ZoneInfo(REPORT_TIMEZONE)
 REPORT_TIME = time(hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MINUTE, tzinfo=REPORT_TZ)
+
+# ---------------------------------------------------------------------------
+# Office-hours configuration
+# ---------------------------------------------------------------------------
+# Loaded from the OFFICE_HOURS_JSON env-var (a JSON string) **or** from a
+# default that matches the Spring 2026 syllabus.  Each entry is:
+#   { "name", "role", "email", "location", "zoom" (optional),
+#     "hours": [ {"days": [0-6 Mon=0], "start": "HH:MM", "end": "HH:MM"} ] }
+# Days follow Python's weekday(): Monday=0 … Sunday=6.
+
+_DEFAULT_OFFICE_HOURS: List[dict] = [
+    {
+        "name": "Justin Pelletier",
+        "role": "Instructor",
+        "email": "jxpics@rit.edu",
+        "location": "CYB-3763",
+        "zoom": None,
+        "hours": [
+            {"days": [1, 3], "start": "15:30", "end": "16:30"},  # Tu/Th 3:30-4:30 PM
+        ],
+    },
+    {
+        "name": "Matthew Wright",
+        "role": "Instructor",
+        "email": "matthew.wright@rit.edu",
+        "location": "CYB-1781",
+        "zoom": "https://rit.zoom.us/my/mkwics?pwd=dUVGUFFONTR2aWN3eUlvQlhCTGFZdz09",
+        "hours": [
+            {"days": [0, 2], "start": "14:00", "end": "15:00"},  # M/W 2:00-3:00 PM
+        ],
+    },
+    {
+        "name": "Sid Dongre",
+        "role": "TA",
+        "email": "sd4767@rit.edu",
+        "location": "CYB-2791",
+        "zoom": "https://rit.zoom.us/my/sd4767?pwd=NWJTWHZiQWVjSXpzV1dPelJ0bUJmUT09",
+        "hours": [
+            {"days": [1], "start": "13:00", "end": "15:00"},  # Tu 1:00-3:00 PM
+        ],
+    },
+]
+
+_raw_oh = os.getenv("OFFICE_HOURS_JSON", "").strip()
+OFFICE_HOURS_DATA: List[dict] = json.loads(_raw_oh) if _raw_oh else _DEFAULT_OFFICE_HOURS
+
+
+@dataclass
+class _OfficeWindow:
+    """One contiguous block of office hours for a staff member."""
+    day: int        # Monday=0
+    start: time
+    end: time
+
+
+@dataclass
+class StaffSchedule:
+    name: str
+    role: str
+    email: str
+    location: str
+    zoom: Optional[str]
+    windows: List[_OfficeWindow] = field(default_factory=list)
+
+
+def _parse_office_hours(data: List[dict]) -> List[StaffSchedule]:
+    """Convert raw JSON/dict list into typed StaffSchedule objects."""
+    schedules: List[StaffSchedule] = []
+    for entry in data:
+        windows: List[_OfficeWindow] = []
+        for block in entry.get("hours", []):
+            start_h, start_m = (int(x) for x in block["start"].split(":"))
+            end_h, end_m = (int(x) for x in block["end"].split(":"))
+            for day in block["days"]:
+                windows.append(
+                    _OfficeWindow(
+                        day=day,
+                        start=time(start_h, start_m),
+                        end=time(end_h, end_m),
+                    )
+                )
+        schedules.append(
+            StaffSchedule(
+                name=entry["name"],
+                role=entry["role"],
+                email=entry["email"],
+                location=entry["location"],
+                zoom=entry.get("zoom"),
+                windows=windows,
+            )
+        )
+    return schedules
+
+
+STAFF_SCHEDULES: List[StaffSchedule] = _parse_office_hours(OFFICE_HOURS_DATA)
+
+_DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _is_available_now(staff: StaffSchedule, now: datetime) -> Optional[_OfficeWindow]:
+    """Return the matching window if *staff* is holding office hours at *now*, else None."""
+    current_day = now.weekday()
+    current_time = now.time()
+    for w in staff.windows:
+        if w.day == current_day and w.start <= current_time < w.end:
+            return w
+    return None
+
+
+def _next_window(staff: StaffSchedule, now: datetime) -> Optional[Tuple[datetime, _OfficeWindow]]:
+    """Return (start_datetime, window) for the next upcoming office-hours block."""
+    if not staff.windows:
+        return None
+    best: Optional[Tuple[datetime, _OfficeWindow]] = None
+    for w in staff.windows:
+        # How many days until this window's weekday?
+        days_ahead = (w.day - now.weekday()) % 7
+        candidate_date = (now + timedelta(days=days_ahead)).date()
+        candidate_dt = datetime.combine(candidate_date, w.start, tzinfo=now.tzinfo)
+        # If it's today but the window already ended, jump to next week
+        if candidate_dt <= now:
+            candidate_date = (now + timedelta(days=days_ahead + 7)).date()
+            candidate_dt = datetime.combine(candidate_date, w.start, tzinfo=now.tzinfo)
+        if best is None or candidate_dt < best[0]:
+            best = (candidate_dt, w)
+    return best
+
+
+def build_office_hours_embed(now: datetime) -> discord.Embed:
+    """Create a rich embed showing who is available and upcoming sessions."""
+    embed = discord.Embed(
+        title="Office Hours",
+        color=discord.Color.blue(),
+        timestamp=now,
+    )
+
+    available_now: List[str] = []
+    upcoming: List[str] = []
+
+    for staff in STAFF_SCHEDULES:
+        active_window = _is_available_now(staff, now)
+        if active_window:
+            loc = staff.location
+            if staff.zoom:
+                loc += f" / [Zoom]({staff.zoom})"
+            ends = active_window.end.strftime("%-I:%M %p")
+            available_now.append(
+                f"**{staff.name}** ({staff.role})\n"
+                f"Until {ends} — {loc}\n"
+                f"{staff.email}"
+            )
+        else:
+            nxt = _next_window(staff, now)
+            if nxt:
+                nxt_dt, nxt_w = nxt
+                day_label = _DAY_ABBR[nxt_w.day]
+                start_str = nxt_w.start.strftime("%-I:%M %p")
+                end_str = nxt_w.end.strftime("%-I:%M %p")
+                loc = staff.location
+                if staff.zoom:
+                    loc += f" / [Zoom]({staff.zoom})"
+                upcoming.append(
+                    f"**{staff.name}** ({staff.role})\n"
+                    f"{day_label} {start_str}–{end_str} — {loc}\n"
+                    f"{staff.email}"
+                )
+
+    if available_now:
+        embed.add_field(
+            name="Available Now",
+            value="\n\n".join(available_now),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Available Now",
+            value="No one is holding office hours right now.",
+            inline=False,
+        )
+
+    if upcoming:
+        embed.add_field(
+            name="Coming Up Next",
+            value="\n\n".join(upcoming),
+            inline=False,
+        )
+
+    # Full weekly schedule summary
+    schedule_lines: List[str] = []
+    for staff in STAFF_SCHEDULES:
+        day_ranges: List[str] = []
+        for block in sorted(staff.windows, key=lambda w: (w.day, w.start)):
+            day_ranges.append(
+                f"{_DAY_ABBR[block.day]} {block.start.strftime('%-I:%M')}"
+                f"–{block.end.strftime('%-I:%M %p')}"
+            )
+        schedule_lines.append(f"**{staff.name}** — {', '.join(day_ranges)}")
+
+    embed.add_field(
+        name="Full Weekly Schedule",
+        value="\n".join(schedule_lines),
+        inline=False,
+    )
+
+    embed.set_footer(text="All times Eastern (ET)")
+    return embed
 
 
 def utcnow_iso() -> str:
@@ -978,6 +1185,13 @@ async def send_daily_report_now(interaction: discord.Interaction):
 
     await channel.send(build_daily_report_text())
     await interaction.response.send_message("Instructor report sent.", ephemeral=True)
+
+
+@bot.tree.command(name="office_hours", description="See who has office hours right now and when the next sessions are.")
+async def office_hours(interaction: discord.Interaction):
+    now = datetime.now(REPORT_TZ)
+    embed = build_office_hours_embed(now)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="dadjoke", description="Post a random dad joke to #extracurricular.")
