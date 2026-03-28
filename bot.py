@@ -21,11 +21,18 @@ from papers_please.views import (
     build_intro_embed,
     build_directive_embed,
     build_entrant_embed,
-    build_daemon_help_embed,
+    build_cerberus_embed,
+    build_game_over_embed,
     GameActionView,
     QuitConfirmView,
 )
-from papers_please.assistant import DAEMON
+from papers_please.assistant import CERBERUS
+from papers_please.charts import (
+    generate_accuracy_chart,
+    generate_topic_performance_chart,
+    generate_difficulty_progression_chart,
+    generate_session_activity_chart,
+)
 
 load_dotenv()
 
@@ -1065,6 +1072,9 @@ class PeerReviewBot(commands.Bot):
 
     async def on_ready(self):
         print(f"Logged in as {self.user} ({self.user.id})")
+        # Initialize game DB using the existing peer-review DB connection
+        game_sessions.init_db(DB.conn)
+        print("Papers Please game database initialized.")
         if not daily_instructor_report.is_running():
             daily_instructor_report.start()
         if not daily_unregistered_nudge.is_running():
@@ -1180,16 +1190,13 @@ async def deliver_feedback(assignment_id: int) -> Tuple[List[str], List[str]]:
 
 
 def build_daily_report_text() -> str:
+    """Build the peer review section of the daily report."""
     reviewer_rows = DB.reviewer_completion_rows()
     team_rows = DB.team_received_rows()
     username_help_rows = DB.recent_username_help_rows()
     delivery_failure_rows = DB.recent_delivery_failure_rows()
 
     lines = []
-    lines.append("**Daily Peer Review Summary**")
-    lines.append(f"Generated: {datetime.now(REPORT_TZ).strftime('%Y-%m-%d %H:%M %Z')}")
-    lines.append("")
-
     lines.append("**Reviews completed per user**")
     if reviewer_rows:
         for row in reviewer_rows:
@@ -1206,12 +1213,12 @@ def build_daily_report_text() -> str:
         lines.append("- None yet")
 
     lines.append("")
-    lines.append("**Username disputes / insistence logs (last 24h)**")
+    lines.append("**Username disputes (last 24h)**")
     if username_help_rows:
         for row in username_help_rows:
             note = row["note"] or "(no note)"
             lines.append(
-                f"- discord_id `{row['discord_id']}` claimed `{row['claimed_username']}` at {row['created_at']} — {note}"
+                f"- `{row['discord_id']}` → `{row['claimed_username']}` — {note}"
             )
     else:
         lines.append("- None")
@@ -1221,12 +1228,121 @@ def build_daily_report_text() -> str:
     if delivery_failure_rows:
         for row in delivery_failure_rows:
             lines.append(
-                f"- assignment `{row['assignment_id']}`, recipient `{row['recipient_username']}` at {row['created_at']} — {row['reason']}"
+                f"- assignment `{row['assignment_id']}` → `{row['recipient_username']}` — {row['reason']}"
             )
     else:
         lines.append("- None")
 
-    return "\n".join(lines[:1900])
+    return "\n".join(lines[:1800])
+
+
+def build_game_report_embed() -> discord.Embed:
+    """Build the game performance section as a rich embed."""
+    if not game_sessions.db:
+        return None
+
+    player_stats = game_sessions.db.get_player_stats()
+    if not player_stats:
+        return None
+
+    embed = discord.Embed(
+        title="🎮 Papers Please — Agent Performance Brief",
+        description=f"Game activity as of {datetime.now(REPORT_TZ).strftime('%Y-%m-%d %H:%M %Z')}",
+        color=0x9B59B6,
+    )
+
+    # Top performers summary
+    top_lines = []
+    for i, row in enumerate(player_stats[:10]):
+        rit = row["rit_username"]
+        play_min = row["total_play_seconds"] // 60 if row["total_play_seconds"] else 0
+        top_lines.append(
+            f"**{i+1}.** `{rit}` — "
+            f"Best: {row['best_score']} | "
+            f"Acc: {row['avg_accuracy']}% | "
+            f"MaxLv: {row['max_difficulty_reached']} | "
+            f"Sessions: {row['total_sessions']} | "
+            f"Time: {play_min}m"
+        )
+    if top_lines:
+        embed.add_field(
+            name="🏆 Leaderboard (by Best Score)",
+            value="\n".join(top_lines),
+            inline=False,
+        )
+
+    # Concept mastery overview
+    topic_data = game_sessions.db.get_topic_performance()
+    if topic_data:
+        mastery_lines = []
+        for topic, stats in topic_data.items():
+            pct = round(stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            mastery_lines.append(f"`{topic[:20]:20s}` [{bar}] {pct}% ({stats['correct']}/{stats['total']})")
+        embed.add_field(
+            name="📚 Concept Mastery by Topic",
+            value="\n".join(mastery_lines[:12]),
+            inline=False,
+        )
+
+    # Milestone summary
+    milestone_rows = game_sessions.db.get_player_milestones()
+    if milestone_rows:
+        m_lines = []
+        for row in milestone_rows[:8]:
+            milestones = row["milestones"].split(",") if row["milestones"] else []
+            m_lines.append(f"`{row['rit_username']}`: {', '.join(milestones[:5])}")
+        embed.add_field(
+            name="🎖️ Milestones Earned",
+            value="\n".join(m_lines),
+            inline=False,
+        )
+
+    embed.set_footer(text="Papers Please • CSEC-472 Authentication Training Module")
+    return embed
+
+
+async def build_game_report_charts() -> List[discord.File]:
+    """Generate chart images for the game report."""
+    charts = []
+    if not game_sessions.db:
+        return charts
+
+    # Accuracy chart
+    player_stats = game_sessions.db.get_player_stats()
+    if player_stats:
+        accuracy_data = [
+            {"label": f"{r['rit_username']}", "accuracy": r["avg_accuracy"] or 0, "total_entrants": r["best_score"]}
+            for r in player_stats[:15]
+        ]
+        chart = generate_accuracy_chart(accuracy_data)
+        if chart:
+            charts.append(chart)
+
+        # Difficulty progression
+        diff_data = [
+            {"label": f"{r['rit_username']}", "max_difficulty": r["max_difficulty_reached"] or 0, "sessions": r["total_sessions"]}
+            for r in player_stats[:15]
+        ]
+        chart2 = generate_difficulty_progression_chart(diff_data)
+        if chart2:
+            charts.append(chart2)
+
+    # Topic performance
+    topic_data = game_sessions.db.get_topic_performance()
+    if topic_data:
+        chart3 = generate_topic_performance_chart(topic_data)
+        if chart3:
+            charts.append(chart3)
+
+    # Activity timeline
+    daily_counts = game_sessions.db.get_daily_session_counts()
+    if daily_counts:
+        chart4 = generate_session_activity_chart(daily_counts)
+        if chart4:
+            charts.append(chart4)
+
+    return charts
 
 
 @tasks.loop(time=REPORT_TIME)
@@ -1240,7 +1356,36 @@ async def daily_instructor_report():
         print(f"Instructor channel '{INSTRUCTOR_CHANNEL_NAME}' not found.")
         return
 
-    await channel.send(build_daily_report_text())
+    # Header embed
+    header_embed = discord.Embed(
+        title="📋 CSEC-472 Daily Executive Brief",
+        description=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')}",
+        color=0x2ECC71,
+    )
+    header_embed.set_footer(text="AuthBot • CSEC-472 Peer Review & Game System")
+    await channel.send(embed=header_embed)
+
+    # Peer review section
+    review_text = build_daily_report_text()
+    review_embed = discord.Embed(
+        title="📝 Peer Review Summary",
+        description=review_text,
+        color=0x3498DB,
+    )
+    await channel.send(embed=review_embed)
+
+    # Game performance section
+    game_embed = build_game_report_embed()
+    if game_embed:
+        await channel.send(embed=game_embed)
+
+    # Charts
+    try:
+        charts = await build_game_report_charts()
+        for chart_file in charts:
+            await channel.send(file=chart_file)
+    except Exception as exc:
+        print(f"[Report] Chart generation error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1483,8 +1628,40 @@ async def send_daily_report_now(interaction: discord.Interaction):
         )
         return
 
-    await channel.send(build_daily_report_text())
-    await interaction.response.send_message("Instructor report sent.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    # Header embed
+    header_embed = discord.Embed(
+        title="📋 CSEC-472 Daily Executive Brief",
+        description=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')} *(manual trigger)*",
+        color=0x2ECC71,
+    )
+    header_embed.set_footer(text="AuthBot • CSEC-472 Peer Review & Game System")
+    await channel.send(embed=header_embed)
+
+    # Peer review section
+    review_text = build_daily_report_text()
+    review_embed = discord.Embed(
+        title="📝 Peer Review Summary",
+        description=review_text,
+        color=0x3498DB,
+    )
+    await channel.send(embed=review_embed)
+
+    # Game performance section
+    game_embed = build_game_report_embed()
+    if game_embed:
+        await channel.send(embed=game_embed)
+
+    # Charts
+    try:
+        charts = await build_game_report_charts()
+        for chart_file in charts:
+            await channel.send(file=chart_file)
+    except Exception as exc:
+        print(f"[Report] Chart generation error: {exc}")
+
+    await interaction.followup.send("Instructor report sent.", ephemeral=True)
 
 
 @bot.tree.command(name="upcoming", description="See upcoming assignment and exam deadlines.")
@@ -1572,7 +1749,7 @@ async def dadjoke(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
-# Papers Please – /play command (DM-based cyberpunk checkpoint game)
+# Papers Please – /play command (DM-based, registration-gated)
 # ---------------------------------------------------------------------------
 
 
@@ -1581,13 +1758,62 @@ async def dadjoke(interaction: discord.Interaction):
     description="Start a Papers Please checkpoint game in your DMs",
 )
 async def play_command(interaction: discord.Interaction):
-    """Launch a new Papers Please game session via DM."""
+    """Launch a new Papers Please game session — requires /register first."""
     user = interaction.user
 
-    # Check for existing session
+    # ── Registration gate ────────────────────────────────────────
+    rit_username = DB.get_rit_username_for_discord(user.id)
+
+    if rit_username is None:
+        # Not registered at all — check if they're an instructor/TA
+        is_staff = (
+            isinstance(user, discord.Member)
+            and is_instructor(user)
+        )
+        if is_staff:
+            # Instructors/TAs: prompt for manual registration
+            await interaction.response.send_message(
+                "You're not registered yet. As an instructor/TA, please use "
+                "`/register <your_rit_username>` first. If your username isn't in "
+                "the class roster, an entry will be created automatically for staff.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "⚠️ **Registration Required**\n\n"
+                "You must `/register` with your RIT username before playing.\n"
+                "This links your Discord account to your student record so we can "
+                "track your progress for CSEC-472.\n\n"
+                "Please double-check your RIT UID (e.g. `abc1234`) and ensure "
+                "you're enrolled in this semester's AUTH course.",
+                ephemeral=True,
+            )
+        return
+
+    # Verify the username is in the class Excel (or they're staff)
+    norm_name = norm_username(rit_username)
+    if norm_name not in DATA.members_by_username:
+        # Username registered but not on roster — might be staff
+        is_staff = (
+            isinstance(user, discord.Member)
+            and is_instructor(user)
+        )
+        if not is_staff:
+            await interaction.response.send_message(
+                f"⚠️ Your registered username `{rit_username}` is not on the class roster.\n\n"
+                "Please verify:\n"
+                "1. Your RIT UID is correct (double/triple-check)\n"
+                "2. You're enrolled in this semester's CSEC-472 AUTH course\n"
+                "3. Use `/register <correct_uid>` to update your registration\n\n"
+                "If you believe this is an error, contact your instructor.",
+                ephemeral=True,
+            )
+            return
+
+    # ── Existing session check ───────────────────────────────────
     if game_sessions.has_active_session(user.id):
         await interaction.response.send_message(
-            "You already have an active game session! Check your DMs. "
+            "You already have an active game session! Check your DMs.\n"
             "Use `/quit_game` to end it first.",
             ephemeral=True,
         )
@@ -1595,36 +1821,41 @@ async def play_command(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=True)
 
-    # Create DM channel
+    # ── Create DM channel ────────────────────────────────────────
     try:
         dm_channel = await user.create_dm()
     except discord.Forbidden:
         await interaction.followup.send(
-            "I can't send you a DM. Please enable DMs from server members "
+            "I can't DM you. Please enable DMs from server members "
             "in your Discord privacy settings and try again.",
             ephemeral=True,
         )
         return
 
-    # Create session and generate first round
-    session = game_sessions.create_session(user.id)
+    # ── Create session ───────────────────────────────────────────
+    session = game_sessions.create_session(user.id, rit_username=rit_username)
     session.generate_next_round()
 
     # Send intro
     intro_embed = build_intro_embed()
     await dm_channel.send(embed=intro_embed)
 
-    # Send DAEMON greeting
-    daemon_embed = build_daemon_help_embed(DAEMON.GREETING)
-    await dm_channel.send(embed=daemon_embed)
+    # CERBERUS greeting
+    cerberus_embed = build_cerberus_embed(CERBERUS.GREETING)
+    await dm_channel.send(embed=cerberus_embed)
 
-    # Send first directive
+    # First directive — pin it
     directive_embed = build_directive_embed(
         session.current_directive, session.difficulty
     )
-    await dm_channel.send(embed=directive_embed)
+    directive_msg = await dm_channel.send(embed=directive_embed)
+    try:
+        await directive_msg.pin()
+        session.pinned_directive_msg_id = directive_msg.id
+    except discord.Forbidden:
+        pass
 
-    # Send first entrant with action buttons
+    # First entrant with action buttons
     entrant_embed = build_entrant_embed(
         session.current_entrant,
         session.total_entrants_seen,
@@ -1634,39 +1865,51 @@ async def play_command(interaction: discord.Interaction):
     await dm_channel.send(embed=entrant_embed, view=view)
 
     await interaction.followup.send(
-        "Game started! Check your DMs for your first checkpoint assignment.",
+        "🎮 **Game started!** Check your DMs for your checkpoint assignment.\n"
+        f"Playing as `{rit_username}`. Good luck, Agent.",
         ephemeral=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# Papers Please – /daemon command (query the AI tutor)
+# Papers Please – /cerberus command (query the AI tutor)
 # ---------------------------------------------------------------------------
 
 
 @bot.tree.command(
-    name="daemon",
-    description="Ask DAEMON about an authentication or security concept",
+    name="cerberus",
+    description="Ask CERBERUS about an authentication or security concept",
 )
 @app_commands.describe(
-    topic="A keyword or concept (e.g. kerberos, mfa, expired, rbac, tls, oauth)"
+    topic="A keyword or concept (e.g. kerberos, mfa, expired, rbac, tls, oauth, 'deep dive tls')"
 )
-async def daemon_command(interaction: discord.Interaction, topic: str):
-    """Query the DAEMON AI tutor for CSEC-472 concept help."""
+async def cerberus_command(interaction: discord.Interaction, topic: str):
+    """Query the CERBERUS AI tutor for CSEC-472 concept help."""
     if topic.lower().strip() in ("help", "topics", "list"):
-        response = DAEMON.get_topic_list()
+        response = CERBERUS.get_topic_list()
     else:
-        response = DAEMON.get_concept_help(topic)
+        response = CERBERUS.get_concept_help(topic)
 
     if response is None:
         response = (
-            f"I don't have a specific entry for **{topic}**, but here's a general tip:\n\n"
-            f"{DAEMON.get_random_tip()}\n\n"
-            f"Try `/daemon topics` to see everything I can help with."
+            f"I don't have a specific entry for **{topic}**, but here's a general advisory:\n\n"
+            f"{CERBERUS.get_random_tip()}\n\n"
+            f"Try `/cerberus topics` to see everything I can help with, or add "
+            f"'deep dive' to any topic for extended protocol analysis."
         )
 
-    embed = build_daemon_help_embed(response)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    embed = build_cerberus_embed(response)
+    # Split if too long for one embed (Discord 4096 char limit)
+    if len(response) > 4000:
+        parts = [response[i:i+3900] for i in range(0, len(response), 3900)]
+        for i, part in enumerate(parts):
+            e = build_cerberus_embed(part)
+            if i == 0:
+                await interaction.response.send_message(embed=e, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=e, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
