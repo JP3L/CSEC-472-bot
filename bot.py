@@ -1464,10 +1464,21 @@ async def register(interaction: discord.Interaction, rit_username: str):
 
     if username not in DATA.members_by_username:
         # Check if user is an instructor/TA — auto-create entry for staff
-        guild = bot.get_guild(GUILD_ID) if GUILD_ID else None
-        member_obj = guild.get_member(interaction.user.id) if guild else None
+        # In guild context, interaction.user is already a discord.Member
+        # Fall back to fetch_member if needed (e.g. DM context)
+        staff = False
+        if isinstance(interaction.user, discord.Member):
+            staff = is_instructor(interaction.user)
+        elif GUILD_ID:
+            guild = bot.get_guild(GUILD_ID)
+            if guild:
+                try:
+                    member_obj = await guild.fetch_member(interaction.user.id)
+                    staff = is_instructor(member_obj)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
 
-        if member_obj and is_instructor(member_obj):
+        if staff:
             DB.upsert_user(interaction.user.id, username)
             await interaction.response.send_message(
                 f"✅ Registered as **staff**: `{username}` (not on the class roster — entry created automatically for instructor/TA).",
