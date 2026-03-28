@@ -1463,6 +1463,18 @@ async def register(interaction: discord.Interaction, rit_username: str):
     username = norm_username(rit_username)
 
     if username not in DATA.members_by_username:
+        # Check if user is an instructor/TA — auto-create entry for staff
+        guild = bot.get_guild(GUILD_ID) if GUILD_ID else None
+        member_obj = guild.get_member(interaction.user.id) if guild else None
+
+        if member_obj and is_instructor(member_obj):
+            DB.upsert_user(interaction.user.id, username)
+            await interaction.response.send_message(
+                f"✅ Registered as **staff**: `{username}` (not on the class roster — entry created automatically for instructor/TA).",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_message(
             "I could not find that RIT username in the workbook. Please try again carefully. "
             "If you are sure it is correct, use `/username_help` so the instructors can investigate.",
