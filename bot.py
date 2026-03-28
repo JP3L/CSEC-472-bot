@@ -25,6 +25,7 @@ from papers_please.views import (
     build_game_over_embed,
     GameActionView,
     QuitConfirmView,
+    unpin_bot_messages,
 )
 from papers_please.assistant import CERBERUS
 from papers_please.charts import (
@@ -1873,6 +1874,7 @@ async def play_command(interaction: discord.Interaction):
     )
     directive_msg = await dm_channel.send(embed=directive_embed)
     try:
+        await unpin_bot_messages(dm_channel, bot.user.id)
         await directive_msg.pin()
         session.pinned_directive_msg_id = directive_msg.id
     except discord.Forbidden:

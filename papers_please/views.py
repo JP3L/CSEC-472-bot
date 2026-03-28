@@ -17,6 +17,24 @@ from .questions import select_question, shuffle_options, ConceptQuestion
 
 
 # ============================================================================
+# HELPERS
+# ============================================================================
+
+async def unpin_bot_messages(channel: discord.DMChannel, bot_id: int) -> None:
+    """Unpin all messages in a DM channel that were sent by the bot."""
+    try:
+        pins = await channel.pins()
+        for msg in pins:
+            if msg.author.id == bot_id:
+                try:
+                    await msg.unpin()
+                except discord.HTTPException:
+                    pass
+    except discord.HTTPException:
+        pass
+
+
+# ============================================================================
 # VISUAL CONSTANTS
 # ============================================================================
 
@@ -496,8 +514,9 @@ class GameActionView(ui.View):
                 self.session.current_directive, self.session.difficulty,
             )
             directive_msg = await interaction.followup.send(embed=directive_embed)
-            # Pin the new directive
+            # Unpin old directives, then pin the new one
             try:
+                await unpin_bot_messages(interaction.channel, interaction.client.user.id)
                 await directive_msg.pin()
                 self.session.pinned_directive_msg_id = directive_msg.id
             except discord.Forbidden:
