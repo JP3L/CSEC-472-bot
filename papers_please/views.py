@@ -156,8 +156,12 @@ def build_entrant_embed(
                     is_flagged = (doc.doc_type, field_name) in flagged_fields
                     if is_flagged:
                         field_lines.append(f"❌ `{field_name:14s}` │ **{val}**")
-                    else:
+                    elif flagged_fields:
+                        # Only show ✅ when CERBERUS scan is active
                         field_lines.append(f"✅ `{field_name:14s}` │ {val}")
+                    else:
+                        # Default: clean display, no markers
+                        field_lines.append(f"`{field_name:14s}` │ {val}")
         value_text = "\n".join(field_lines) if field_lines else "*[No data]*"
         embed.add_field(name=f"{emoji} {doc_name}", value=value_text, inline=False)
 
