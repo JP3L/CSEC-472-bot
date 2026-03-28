@@ -24,11 +24,14 @@ GUILD_ID_RAW = os.getenv("DISCORD_GUILD_ID", "").strip()
 GUILD_ID = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
 INSTRUCTOR_CHANNEL_NAME = os.getenv("INSTRUCTOR_CHANNEL_NAME", "instructors").strip()
 DADJOKE_CHANNEL_NAME = os.getenv("DADJOKE_CHANNEL_NAME", "extracurricular").strip()
+GENERAL_CHANNEL_NAME = os.getenv("GENERAL_CHANNEL_NAME", "general").strip()
 EXCEL_FILE = os.getenv("EXCEL_FILE", "Teams-WireFrames.xlsx").strip()
 DATABASE_FILE = os.getenv("DATABASE_FILE", "peer_reviews.db").strip()
 REPORT_TIMEZONE = os.getenv("REPORT_TIMEZONE", "America/New_York").strip()
 DAILY_REPORT_HOUR = int(os.getenv("DAILY_REPORT_HOUR", "18"))
 DAILY_REPORT_MINUTE = int(os.getenv("DAILY_REPORT_MINUTE", "0"))
+NUDGE_HOUR = int(os.getenv("NUDGE_HOUR", "8"))
+NUDGE_MINUTE = int(os.getenv("NUDGE_MINUTE", "0"))
 MAX_REVIEWS_PER_REVIEWER = 3
 
 if not TOKEN:
@@ -39,6 +42,7 @@ if not os.path.exists(EXCEL_FILE):
 GUILD_OBJECT = discord.Object(id=GUILD_ID) if GUILD_ID else None
 REPORT_TZ = ZoneInfo(REPORT_TIMEZONE)
 REPORT_TIME = time(hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MINUTE, tzinfo=REPORT_TZ)
+NUDGE_TIME = time(hour=NUDGE_HOUR, minute=NUDGE_MINUTE, tzinfo=REPORT_TZ)
 
 # ---------------------------------------------------------------------------
 # Office-hours configuration
@@ -176,7 +180,8 @@ def build_office_hours_embed(now: datetime) -> discord.Embed:
     )
 
     available_now: List[str] = []
-    upcoming: List[str] = []
+    # Each entry is (next_start_datetime, formatted_text) so we can sort by date.
+    upcoming_with_dt: List[Tuple[datetime, str]] = []
 
     for staff in STAFF_SCHEDULES:
         active_window = _is_available_now(staff, now)
@@ -200,11 +205,16 @@ def build_office_hours_embed(now: datetime) -> discord.Embed:
                 loc = staff.location
                 if staff.zoom:
                     loc += f" / [Zoom]({staff.zoom})"
-                upcoming.append(
+                upcoming_with_dt.append((
+                    nxt_dt,
                     f"**{staff.name}** ({staff.role})\n"
                     f"{day_label} {start_str}–{end_str} — {loc}\n"
-                    f"{staff.email}"
-                )
+                    f"{staff.email}",
+                ))
+
+    # Sort by soonest session first.
+    upcoming_with_dt.sort(key=lambda entry: entry[0])
+    upcoming = [text for _dt, text in upcoming_with_dt]
 
     if available_now:
         embed.add_field(
@@ -578,6 +588,24 @@ class Database:
             """
         ).fetchall()
 
+    def unregistered_usernames_with_pending_reviews(self) -> List[sqlite3.Row]:
+        """Return usernames that have delivery failures because they haven't
+        registered yet, along with how many reviews are waiting for them.
+        Only includes usernames that are still NOT in the users table."""
+        return self.conn.execute(
+            """
+            SELECT df.recipient_username,
+                   COUNT(DISTINCT df.assignment_id) AS pending_review_count
+            FROM delivery_failures df
+            LEFT JOIN users u
+                ON df.recipient_username = u.rit_username
+            WHERE u.rit_username IS NULL
+              AND df.reason LIKE '%not registered%'
+            GROUP BY df.recipient_username
+            ORDER BY df.recipient_username ASC
+            """
+        ).fetchall()
+
 
 # ============================================================================
 # INSTANTIATE DATABASE AND WORKBOOK DATA (after Database class is defined)
@@ -883,6 +911,8 @@ class PeerReviewBot(commands.Bot):
         print(f"Logged in as {self.user} ({self.user.id})")
         if not daily_instructor_report.is_running():
             daily_instructor_report.start()
+        if not daily_unregistered_nudge.is_running():
+            daily_unregistered_nudge.start()
 
 
 bot = PeerReviewBot()
@@ -908,6 +938,23 @@ async def get_instructor_channel() -> Optional[discord.TextChannel]:
 
     for channel in guild.text_channels:
         if channel.name == INSTRUCTOR_CHANNEL_NAME:
+            return channel
+    return None
+
+
+async def get_general_channel() -> Optional[discord.TextChannel]:
+    if GUILD_ID is None:
+        return None
+
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        try:
+            guild = await bot.fetch_guild(GUILD_ID)
+        except discord.DiscordException:
+            return None
+
+    for channel in guild.text_channels:
+        if channel.name == GENERAL_CHANNEL_NAME:
             return channel
     return None
 
@@ -1009,12 +1056,62 @@ def build_daily_report_text() -> str:
 
 @tasks.loop(time=REPORT_TIME)
 async def daily_instructor_report():
+    # Skip weekends (Saturday=5, Sunday=6).
+    if datetime.now(REPORT_TZ).weekday() >= 5:
+        return
+
     channel = await get_instructor_channel()
     if channel is None:
         print(f"Instructor channel '{INSTRUCTOR_CHANNEL_NAME}' not found.")
         return
 
     await channel.send(build_daily_report_text())
+
+
+# ---------------------------------------------------------------------------
+# Daily unregistered-users nudge  (posts to #general at 08:00 by default)
+# ---------------------------------------------------------------------------
+
+def build_unregistered_nudge_text() -> Optional[str]:
+    """Build a message listing usernames that have reviews waiting but haven't
+    registered yet.  Returns None if everyone is registered."""
+    rows = DB.unregistered_usernames_with_pending_reviews()
+    if not rows:
+        return None
+
+    lines: List[str] = []
+    lines.append("**Peer reviews are waiting for you!**")
+    lines.append(
+        "The following students have feedback ready to be delivered, "
+        "but haven't registered with the bot yet. "
+        "Use `/register <your_rit_username>` to get caught up!"
+    )
+    lines.append("")
+
+    for row in rows:
+        count = row["pending_review_count"]
+        review_word = "review" if count == 1 else "reviews"
+        lines.append(f"- `{row['recipient_username']}` — {count} {review_word} waiting")
+
+    return "\n".join(lines)
+
+
+@tasks.loop(time=NUDGE_TIME)
+async def daily_unregistered_nudge():
+    # Skip weekends (Saturday=5, Sunday=6).
+    if datetime.now(REPORT_TZ).weekday() >= 5:
+        return
+
+    channel = await get_general_channel()
+    if channel is None:
+        print(f"General channel '{GENERAL_CHANNEL_NAME}' not found; skipping unregistered nudge.")
+        return
+
+    message = build_unregistered_nudge_text()
+    if message is None:
+        return  # Everyone is registered — nothing to post.
+
+    await channel.send(message)
 
 
 @bot.tree.command(name="register", description="Register your Discord account to your RIT username.")
