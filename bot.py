@@ -16,6 +16,16 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from catchup_handler import CatchupHandler
+from papers_please.session import game_sessions
+from papers_please.views import (
+    build_intro_embed,
+    build_directive_embed,
+    build_entrant_embed,
+    build_daemon_help_embed,
+    GameActionView,
+    QuitConfirmView,
+)
+from papers_please.assistant import DAEMON
 
 load_dotenv()
 
@@ -1557,6 +1567,131 @@ async def dadjoke(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"I've pushed a dad joke to #{DADJOKE_CHANNEL_NAME}... everyone (well, maybe only some people) "
         "likes a good dad joke but no one appreciates a channel spammer, so please use this with discretion.",
+        ephemeral=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Papers Please – /play command (DM-based cyberpunk checkpoint game)
+# ---------------------------------------------------------------------------
+
+
+@bot.tree.command(
+    name="play",
+    description="Start a Papers Please checkpoint game in your DMs",
+)
+async def play_command(interaction: discord.Interaction):
+    """Launch a new Papers Please game session via DM."""
+    user = interaction.user
+
+    # Check for existing session
+    if game_sessions.has_active_session(user.id):
+        await interaction.response.send_message(
+            "You already have an active game session! Check your DMs. "
+            "Use `/quit_game` to end it first.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Create DM channel
+    try:
+        dm_channel = await user.create_dm()
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I can't send you a DM. Please enable DMs from server members "
+            "in your Discord privacy settings and try again.",
+            ephemeral=True,
+        )
+        return
+
+    # Create session and generate first round
+    session = game_sessions.create_session(user.id)
+    session.generate_next_round()
+
+    # Send intro
+    intro_embed = build_intro_embed()
+    await dm_channel.send(embed=intro_embed)
+
+    # Send DAEMON greeting
+    daemon_embed = build_daemon_help_embed(DAEMON.GREETING)
+    await dm_channel.send(embed=daemon_embed)
+
+    # Send first directive
+    directive_embed = build_directive_embed(
+        session.current_directive, session.difficulty
+    )
+    await dm_channel.send(embed=directive_embed)
+
+    # Send first entrant with action buttons
+    entrant_embed = build_entrant_embed(
+        session.current_entrant,
+        session.total_entrants_seen,
+        session,
+    )
+    view = GameActionView(session)
+    await dm_channel.send(embed=entrant_embed, view=view)
+
+    await interaction.followup.send(
+        "Game started! Check your DMs for your first checkpoint assignment.",
+        ephemeral=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Papers Please – /daemon command (query the AI tutor)
+# ---------------------------------------------------------------------------
+
+
+@bot.tree.command(
+    name="daemon",
+    description="Ask DAEMON about an authentication or security concept",
+)
+@app_commands.describe(
+    topic="A keyword or concept (e.g. kerberos, mfa, expired, rbac, tls, oauth)"
+)
+async def daemon_command(interaction: discord.Interaction, topic: str):
+    """Query the DAEMON AI tutor for CSEC-472 concept help."""
+    if topic.lower().strip() in ("help", "topics", "list"):
+        response = DAEMON.get_topic_list()
+    else:
+        response = DAEMON.get_concept_help(topic)
+
+    if response is None:
+        response = (
+            f"I don't have a specific entry for **{topic}**, but here's a general tip:\n\n"
+            f"{DAEMON.get_random_tip()}\n\n"
+            f"Try `/daemon topics` to see everything I can help with."
+        )
+
+    embed = build_daemon_help_embed(response)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# Papers Please – /quit_game command
+# ---------------------------------------------------------------------------
+
+
+@bot.tree.command(
+    name="quit_game",
+    description="End your current Papers Please game session",
+)
+async def quit_game_command(interaction: discord.Interaction):
+    """End the current game session with a final summary."""
+    session = game_sessions.get_session(interaction.user.id)
+    if session is None:
+        await interaction.response.send_message(
+            "You don't have an active game session. Use `/play` to start one.",
+            ephemeral=True,
+        )
+        return
+
+    view = QuitConfirmView(session)
+    await interaction.response.send_message(
+        "Are you sure you want to end your current session?",
+        view=view,
         ephemeral=True,
     )
 
