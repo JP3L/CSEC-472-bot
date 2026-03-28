@@ -55,7 +55,7 @@ _DEFAULT_OFFICE_HOURS: List[dict] = [
         "role": "Instructor",
         "email": "jxpics@rit.edu",
         "location": "CYB-3763",
-        "zoom": None,
+        "zoom": "https://rit.zoom.us/j/99911135440?from=addon",
         "hours": [
             {"days": [1, 3], "start": "15:30", "end": "16:30"},  # Tu/Th 3:30-4:30 PM
         ],
@@ -816,6 +816,11 @@ class CommentsModal(discord.ui.Modal, title="Peer Review Comments"):
             )
             return
 
+        # Defer immediately — deliver_feedback() sends DMs to every registered
+        # team member, which can easily exceed Discord's 3-second interaction
+        # deadline and cause a "404 Unknown interaction" error.
+        await interaction.response.defer(ephemeral=True)
+
         DB.submit_comments(
             self.assignment_id,
             self.intro_comment.value.strip(),
@@ -831,7 +836,7 @@ class CommentsModal(discord.ui.Modal, title="Peer Review Comments"):
         if failed:
             message += "\n\nSome deliveries failed:\n- " + "\n- ".join(failed[:10])
 
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 class StartReviewView(discord.ui.View):
