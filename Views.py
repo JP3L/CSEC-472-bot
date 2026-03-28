@@ -216,6 +216,10 @@ class GameActionView(ui.View):
             self.stop()
             return
 
+        # Generate next round BEFORE displaying directive (generate_next_round
+        # creates the new directive when difficulty increased and it was cleared).
+        self.session.generate_next_round()
+
         # Send new directive if difficulty increased
         if difficulty_increased:
             directive_embed = build_directive_embed(
@@ -223,8 +227,7 @@ class GameActionView(ui.View):
             )
             await interaction.followup.send(embed=directive_embed)
 
-        # Generate and send next entrant
-        self.session.generate_next_round()
+        # Send next entrant
         entrant_embed = build_entrant_embed(
             self.session.current_entrant,
             self.session.total_entrants_seen,
