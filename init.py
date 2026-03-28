@@ -1,6 +1,7 @@
 """
 papers_please - A cyberpunk Papers Please game for Discord.
 Set in 2032 America during WWIII. Players act as UACC Digital Checkpoint Agents.
+Features CERBERUS — the three-headed guardian AI tutor.
 """
 
 from .models import Document, Entrant, SecurityDirective, GameState, InspectionResult
