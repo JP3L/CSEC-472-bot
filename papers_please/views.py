@@ -564,7 +564,7 @@ class GameActionView(ui.View):
     async def allow_button(self, interaction: discord.Interaction, button: ui.Button):
         await self._handle_decision(interaction, "allow")
 
-    @ui.button(label="DENY", style=discord.ButtonStyle.red, emoji="🚫", row=0)
+    @ui.button(label="DENY", style=discord.ButtonStyle.secondary, emoji="⛔", row=0)
     async def deny_button(self, interaction: discord.Interaction, button: ui.Button):
         await self._handle_decision(interaction, "deny")
 
@@ -572,7 +572,7 @@ class GameActionView(ui.View):
     async def detain_button(self, interaction: discord.Interaction, button: ui.Button):
         await self._handle_decision(interaction, "detain")
 
-    @ui.button(label="Ask CERBERUS", style=discord.ButtonStyle.secondary, emoji="🐕‍🦺", row=1)
+    @ui.button(label="Ask CERBERUS", style=discord.ButtonStyle.primary, emoji="🐕‍🦺", row=1)
     async def cerberus_button(self, interaction: discord.Interaction, button: ui.Button):
         if self.session.current_entrant is None or self.session.current_directive is None:
             await interaction.response.send_message("No active entrant.", ephemeral=True)
