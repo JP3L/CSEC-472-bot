@@ -102,8 +102,18 @@ def build_entrant_embed(
     entrant: Entrant,
     entrant_number: int,
     session: PlayerSession,
+    flagged_fields: set = None,
 ) -> discord.Embed:
-    """Build a visually rich embed for an entrant's documents."""
+    """Build a visually rich embed for an entrant's documents.
+
+    Args:
+        flagged_fields: Optional set of (doc_type, field_name) tuples.
+            If provided, those fields are highlighted with ❌ markers
+            to indicate CERBERUS-detected issues.
+    """
+    if flagged_fields is None:
+        flagged_fields = set()
+
     # Approach flavor text
     approach_texts = [
         "A figure materializes at your terminal, data streams flickering...",
@@ -114,11 +124,19 @@ def build_entrant_embed(
         "Terminal alert: new subject in the verification queue...",
     ]
 
-    embed = discord.Embed(
-        title=f"👤 ENTRANT #{entrant_number} — INSPECTION REQUIRED",
-        description=random.choice(approach_texts),
-        color=COLOR_ENTRANT,
-    )
+    # If flagged, change the title/color to indicate CERBERUS scan results
+    if flagged_fields:
+        embed = discord.Embed(
+            title=f"🔍 ENTRANT #{entrant_number} — CERBERUS SCAN RESULTS",
+            description="Fields marked with ❌ have issues detected by CERBERUS.",
+            color=0xE74C3C,  # Red for flagged
+        )
+    else:
+        embed = discord.Embed(
+            title=f"👤 ENTRANT #{entrant_number} — INSPECTION REQUIRED",
+            description=random.choice(approach_texts),
+            color=COLOR_ENTRANT,
+        )
 
     # Document display with visual formatting
     doc_emojis = {
@@ -135,8 +153,12 @@ def build_entrant_embed(
             for field_name in theme.DOCUMENT_FIELDS[doc.doc_type]:
                 if field_name in doc.fields:
                     val = doc.fields[field_name]
-                    field_lines.append(f"`{field_name:14s}` │ {val}")
-        value_text = "```\n" + "\n".join(field_lines) + "\n```" if field_lines else "*[No data]*"
+                    is_flagged = (doc.doc_type, field_name) in flagged_fields
+                    if is_flagged:
+                        field_lines.append(f"❌ `{field_name:14s}` │ **{val}**")
+                    else:
+                        field_lines.append(f"✅ `{field_name:14s}` │ {val}")
+        value_text = "\n".join(field_lines) if field_lines else "*[No data]*"
         embed.add_field(name=f"{emoji} {doc_name}", value=value_text, inline=False)
 
     # Status bar footer
@@ -533,11 +555,29 @@ class GameActionView(ui.View):
             await interaction.response.send_message("No active entrant.", ephemeral=True)
             return
         self.session.cerberus_hints_used += 1
-        hint = CERBERUS.get_inspection_hint(
-            self.session.current_entrant, self.session.current_directive
-        )
-        embed = build_cerberus_embed(hint)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        entrant = self.session.current_entrant
+        directive = self.session.current_directive
+
+        # Get contextual analysis
+        hint = CERBERUS.get_inspection_hint(entrant, directive)
+        flagged = CERBERUS.get_flagged_fields(entrant, directive)
+
+        # Build CERBERUS analysis embed
+        cerberus_embed = build_cerberus_embed(hint)
+
+        # Build re-rendered entrant embed with flagged fields highlighted
+        embeds = [cerberus_embed]
+        if flagged:
+            flagged_entrant = build_entrant_embed(
+                entrant,
+                self.session.game_state.entrants_processed,
+                self.session,
+                flagged_fields=flagged,
+            )
+            embeds.append(flagged_entrant)
+
+        await interaction.response.send_message(embeds=embeds, ephemeral=True)
 
     @ui.button(label="Score", style=discord.ButtonStyle.secondary, emoji="📊", row=1)
     async def score_button(self, interaction: discord.Interaction, button: ui.Button):

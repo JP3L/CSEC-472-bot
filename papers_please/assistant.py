@@ -14,6 +14,7 @@ that reinforces core course material.
 
 import random
 from typing import Optional, Dict, List
+from . import theme
 from .models import Entrant, SecurityDirective, InspectionResult
 
 
@@ -734,26 +735,27 @@ class CERBERUS:
     HEADS = "🔑🪪🧬"
 
     GREETING = (
-        "```ansi\n"
-        "\033[0;31m╔══════════════════════════════════════════════════════════════════╗\n"
-        "║  ██████╗███████╗██████╗ ██████╗ ███████╗██████╗ ██╗   ██╗███████╗║\n"
-        "║  ██╔═══╝██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗██║   ██║██╔════╝║\n"
-        "║  ██║    █████╗  ██████╔╝██████╔╝█████╗  ██████╔╝██║   ██║███████╗║\n"
-        "║  ██║    ██╔══╝  ██╔══██╗██╔══██╗██╔══╝  ██╔══██╗██║   ██║╚════██║║\n"
-        "║  ██████╗███████╗██║  ██║██████╔╝███████╗██║  ██║╚██████╔╝███████║║\n"
-        "║  ╚═════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝╚══════╝║\n"
-        "║  Three-Headed Guardian • UACC Cyber Division • v4.0.1              ║\n"
-        "╚══════════════════════════════════════════════════════════════════════╝\033[0m\n"
         "```\n"
-        "**🔑 HEAD I** (Knowledge) — **🪪 HEAD II** (Possession) — **🧬 HEAD III** (Inherence)\n\n"
-        "I am CERBERUS, the three-headed guardian of the UACC checkpoint. My three heads "
-        "represent the three pillars of authentication — just as the mythological Cerberus "
-        "guarded the gates of the underworld, I guard the gates of our network.\n\n"
-        "Each document you inspect maps to a concept from your **CSEC-472** coursework. "
-        "Ask me about any authentication protocol, security model, or cryptographic principle "
-        "and I'll show you exactly how it applies to your checkpoint decisions.\n\n"
-        "Use the **Ask CERBERUS** button for contextual hints during inspections, or use "
-        "`/cerberus <topic>` for deep dives into specific concepts."
+        "  ╔═══════════════════════════════════════╗\n"
+        "  ║         C E R B E R U S               ║\n"
+        "  ║   Three-Headed Guardian • v4.0.1      ║\n"
+        "  ║   UACC Cyber Division                 ║\n"
+        "  ╠═══════════════════════════════════════╣\n"
+        "  ║  🔑 HEAD I   ║ Knowledge (passwords)  ║\n"
+        "  ║  🪪 HEAD II  ║ Possession (tokens)    ║\n"
+        "  ║  🧬 HEAD III ║ Inherence (biometrics) ║\n"
+        "  ╚═══════════════════════════════════════╝\n"
+        "```\n"
+        "I am **CERBERUS**, the three-headed guardian of the UACC checkpoint. "
+        "Just as the mythological Cerberus guarded the gates of the underworld, "
+        "I guard the gates of our network. My three heads represent the **three pillars "
+        "of authentication** you study in CSEC-472.\n\n"
+        "Each document you inspect maps to a real-world security concept. "
+        "When you press **Ask CERBERUS** during gameplay, I'll analyze the specific "
+        "credentials in front of you — flagging mismatches, expirations, and policy "
+        "violations with references to the underlying protocol.\n\n"
+        "Use `/cerberus <topic>` for deep dives into Kerberos, TLS, OAuth, MFA, "
+        "access control models, and more."
     )
 
     @staticmethod
@@ -784,75 +786,216 @@ class CERBERUS:
 
         return None
 
+    CURRENT_DATE = "2032.11.22"
+
     @staticmethod
-    def get_inspection_hint(entrant: Entrant, directive: SecurityDirective) -> str:
-        """Provide detailed contextual hints based on the current entrant and directive."""
-        hints = []
+    def _find_issues(entrant: Entrant, directive: SecurityDirective) -> list:
+        """Analyze entrant documents against the directive and return specific findings.
 
+        Each finding is a dict with:
+          - type: "wanted_match", "handle_mismatch", "faction_mismatch",
+                  "field_mismatch", "expired", "denied_faction", "missing_doc", etc.
+          - severity: "critical", "warning", "info"
+          - message: str (the user-facing hint)
+          - fields: list of (doc_type, field_name) tuples that are problematic
+        """
+        findings = []
+        current_date = CERBERUS.CURRENT_DATE
+        doc_names = {dt: theme.DOCUMENT_TYPES.get(dt, dt) for dt in theme.DOCUMENT_TYPES}
+
+        # --- 1. Wanted handle check (CRL) ---
         if directive.wanted_handle:
-            hints.append(
-                "🔍 **CRL/OCSP Check Required**\n"
-                "The directive lists a **wanted handle** — this is your Certificate Revocation List. "
-                "In TLS, a client checks the CRL or queries OCSP before trusting any certificate. "
-                "Compare the wanted handle against the entrant's handle on EVERY document they present. "
-                "This check takes priority over ALL other validation steps. If the handle matches: "
-                "**DETAIN immediately** — don't waste time on other checks."
-            )
+            for doc in entrant.documents:
+                h = doc.fields.get("HANDLE")
+                if h and h.upper() == directive.wanted_handle.upper():
+                    findings.append({
+                        "type": "wanted_match",
+                        "severity": "critical",
+                        "message": (
+                            f"🚨 **WANTED HANDLE MATCH — DETAIN**\n"
+                            f"The handle **`{h}`** on the **{doc_names.get(doc.doc_type, doc.doc_type)}** "
+                            f"matches the wanted handle in the directive. In TLS terms, this certificate "
+                            f"appears on the **CRL (Certificate Revocation List)**. A revoked certificate "
+                            f"must be rejected immediately — DETAIN this subject."
+                        ),
+                        "fields": [(doc.doc_type, "HANDLE")],
+                    })
 
-        if directive.denied_factions:
-            denied_list = ", ".join(directive.denied_factions)
-            hints.append(
-                f"🛡️ **RBAC Policy Active — Denied Factions: {denied_list}**\n"
-                "The directive denies specific factions. In RBAC, role-level permissions override "
-                "individual credentials. Check the entrant's FACTION field against the deny list. "
-                "If their faction is denied, no amount of valid documentation can override the "
-                "role-based policy — DENY and move on. This is Mandatory Access Control in action."
+        # --- 2. Cross-document handle consistency ---
+        handles = {}
+        for doc in entrant.documents:
+            h = doc.fields.get("HANDLE")
+            if h:
+                handles.setdefault(h, []).append(doc.doc_type)
+        if len(handles) > 1:
+            handle_details = ", ".join(
+                f"**{h}** ({', '.join(doc_names.get(dt, dt) for dt in dts)})"
+                for h, dts in handles.items()
             )
+            all_handle_fields = [(dt, "HANDLE") for dts in handles.values() for dt in dts]
+            findings.append({
+                "type": "handle_mismatch",
+                "severity": "critical",
+                "message": (
+                    f"⚠️ **HANDLE MISMATCH DETECTED — Integrity Violation**\n"
+                    f"Documents show different handles: {handle_details}. "
+                    f"Cross-document consistency is a core **Clark-Wilson** integrity check — "
+                    f"if the same person's credentials don't agree on their identity, "
+                    f"the data has been tampered with or the documents belong to different people. "
+                    f"**DETAIN** for forgery."
+                ),
+                "fields": all_handle_fields,
+            })
 
-        doc_types = {d.doc_type for d in entrant.documents}
-        if len(entrant.documents) > 2:
-            hints.append(
-                "📋 **Multi-Document Integrity Verification (Biba Model)**\n"
-                "This entrant presents multiple documents — you MUST cross-reference shared fields "
-                "for consistency. Build a mental table:\n"
-                "```\n"
-                "Field      | Doc 1    | Doc 2    | Doc 3    | Match?\n"
-                "ID#        | ...      | ...      | ...      | ?\n"
-                "HANDLE     | ...      | ...      | ...      | ?\n"
-                "FACTION    | ...      | ...      | ...      | ?\n"
-                "HEIGHT     | ...      | ...      | ...      | ?\n"
-                "WEIGHT     | ...      | ...      | ...      | ?\n"
-                "```\n"
-                "ANY mismatch = integrity violation = DETAIN. This is your Clark-Wilson IVP."
+        # --- 3. Cross-document faction consistency ---
+        factions = {}
+        for doc in entrant.documents:
+            f = doc.fields.get("FACTION")
+            if f:
+                factions.setdefault(f, []).append(doc.doc_type)
+        if len(factions) > 1:
+            faction_details = ", ".join(
+                f"**{f}** ({', '.join(doc_names.get(dt, dt) for dt in dts)})"
+                for f, dts in factions.items()
             )
+            all_faction_fields = [(dt, "FACTION") for dts in factions.values() for dt in dts]
+            findings.append({
+                "type": "faction_mismatch",
+                "severity": "critical",
+                "message": (
+                    f"⚠️ **FACTION MISMATCH — Cross-Document Inconsistency**\n"
+                    f"Documents claim different factions: {faction_details}. "
+                    f"This is like presenting an OAuth token scoped to one organization "
+                    f"while your ID badge belongs to another. Integrity check fails — **DETAIN**."
+                ),
+                "fields": all_faction_fields,
+            })
 
+        # --- 4. Cross-document field mismatches (HEIGHT, WEIGHT, ID#, SEX, DOB) ---
+        shared_fields = ["HEIGHT", "WEIGHT", "ID#", "SEX", "DOB"]
+        for field_name in shared_fields:
+            values = {}
+            for doc in entrant.documents:
+                v = doc.fields.get(field_name)
+                if v:
+                    values.setdefault(v, []).append(doc.doc_type)
+            if len(values) > 1:
+                detail = ", ".join(
+                    f"**{v}** ({', '.join(doc_names.get(dt, dt) for dt in dts)})"
+                    for v, dts in values.items()
+                )
+                mismatch_fields = [(dt, field_name) for dts in values.values() for dt in dts]
+                findings.append({
+                    "type": "field_mismatch",
+                    "severity": "critical",
+                    "message": (
+                        f"⚠️ **{field_name} MISMATCH**\n"
+                        f"Documents disagree on `{field_name}`: {detail}. "
+                        f"In Biba's integrity model, data that contradicts itself cannot be trusted. "
+                        f"**DETAIN** for document forgery."
+                    ),
+                    "fields": mismatch_fields,
+                })
+
+        # --- 5. Expiration check ---
+        for doc in entrant.documents:
+            exp = doc.fields.get("EXP")
+            if exp:
+                try:
+                    # Compare date strings directly (YYYY.MM.DD format sorts correctly)
+                    if exp < current_date:
+                        findings.append({
+                            "type": "expired",
+                            "severity": "critical",
+                            "message": (
+                                f"⏰ **EXPIRED CREDENTIAL — {doc_names.get(doc.doc_type, doc.doc_type)}**\n"
+                                f"EXP date is **{exp}**, but the current date is **{current_date}**. "
+                                f"In TLS, an expired certificate triggers a hard failure — the browser "
+                                f"refuses the connection entirely. Apply the same standard: **DENY**."
+                            ),
+                            "fields": [(doc.doc_type, "EXP")],
+                        })
+                except (TypeError, ValueError):
+                    pass
+
+        # --- 6. Denied faction ---
+        for doc in entrant.documents:
+            f = doc.fields.get("FACTION")
+            if f and f in directive.denied_factions:
+                findings.append({
+                    "type": "denied_faction",
+                    "severity": "critical",
+                    "message": (
+                        f"🛡️ **DENIED FACTION — {f}**\n"
+                        f"The **{doc_names.get(doc.doc_type, doc.doc_type)}** shows faction **{f}**, "
+                        f"which is on the directive's deny list. In RBAC, role-based policy overrides "
+                        f"individual credentials — no amount of valid documentation can bypass a "
+                        f"faction-level deny. **DENY** entry."
+                    ),
+                    "fields": [(doc.doc_type, "FACTION")],
+                })
+                break  # Only report once
+
+        # --- 7. Operator-level access ---
         for doc in entrant.documents:
             if doc.doc_type == "access_token" and doc.fields.get("PURPOSE") == "OPERATION":
-                hints.append(
-                    "⚡ **Elevated Privilege Alert (Principle of Least Privilege)**\n"
-                    "This entrant holds an OPERATION token — equivalent to an OAuth token with "
-                    "admin/write scopes. In the principle of least privilege, elevated access requires "
-                    "elevated verification. Check the directive for operator-specific requirements: "
-                    "they likely need additional documentation (clearance codes, integrity reports) "
-                    "that TRANSIT-level entrants don't need. Missing ANY required operator document = DENY."
-                )
+                findings.append({
+                    "type": "operator_access",
+                    "severity": "warning",
+                    "message": (
+                        "⚡ **Elevated Privilege — OPERATION Token**\n"
+                        "This entrant holds an OPERATION-level access token (admin scope in OAuth terms). "
+                        "Check the directive for operator-specific document requirements — they likely "
+                        "need additional credentials that TRANSIT-level entrants don't."
+                    ),
+                    "fields": [(doc.doc_type, "PURPOSE")],
+                })
                 break
 
-        has_exp = any("EXP" in d.fields for d in entrant.documents)
-        if has_exp:
-            hints.append(
-                "⏰ **Certificate Expiration Check (Key Lifecycle Management)**\n"
-                "Documents with EXP fields require date validation against the current date: "
-                "**2032.11.22**. In TLS, expired certificates are hard-rejected — browsers show "
-                "full-page warnings and refuse the connection by default. Apply the same standard: "
-                "if ANY document's EXP date is before 2032.11.22, the credential has lapsed. DENY."
-            )
+        # --- 8. If clean, say so ---
+        if not findings:
+            findings.append({
+                "type": "clean",
+                "severity": "info",
+                "message": (
+                    "✅ **No Obvious Violations Detected**\n"
+                    "Handles are consistent, no expirations, no denied factions. "
+                    "Double-check the directive for required document types and scans. "
+                    "If all requirements are met, this entrant should be **ALLOWED**."
+                ),
+                "fields": [],
+            })
 
-        if not hints:
-            hints.append(random.choice(GENERAL_TIPS))
+        return findings
 
-        selected = random.sample(hints, min(3, len(hints)))
-        return "\n\n".join(selected)
+    @staticmethod
+    def get_inspection_hint(entrant: Entrant, directive: SecurityDirective) -> str:
+        """Analyze the current entrant's documents against the directive and return specific findings."""
+        findings = CERBERUS._find_issues(entrant, directive)
+
+        # Always show all critical findings; cap at 4 total
+        critical = [f for f in findings if f["severity"] == "critical"]
+        other = [f for f in findings if f["severity"] != "critical"]
+
+        selected = critical[:4]
+        remaining_slots = 4 - len(selected)
+        if remaining_slots > 0 and other:
+            selected.extend(other[:remaining_slots])
+
+        messages = [f["message"] for f in selected]
+        return "\n\n".join(messages)
+
+    @staticmethod
+    def get_flagged_fields(entrant: Entrant, directive: SecurityDirective) -> set:
+        """Return a set of (doc_type, field_name) tuples that have issues.
+        Used by the UI to highlight problematic fields in red."""
+        findings = CERBERUS._find_issues(entrant, directive)
+        flagged = set()
+        for finding in findings:
+            if finding["severity"] == "critical":
+                for pair in finding["fields"]:
+                    flagged.add(pair)
+        return flagged
 
     @staticmethod
     def explain_mistake(result: InspectionResult, player_decision: str) -> str:
