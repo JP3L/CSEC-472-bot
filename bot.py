@@ -25,6 +25,7 @@ GUILD_ID = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
 INSTRUCTOR_CHANNEL_NAME = os.getenv("INSTRUCTOR_CHANNEL_NAME", "instructors").strip()
 DADJOKE_CHANNEL_NAME = os.getenv("DADJOKE_CHANNEL_NAME", "extracurricular").strip()
 GENERAL_CHANNEL_NAME = os.getenv("GENERAL_CHANNEL_NAME", "general").strip()
+DEADLINES_CHANNEL_NAME = os.getenv("DEADLINES_CHANNEL_NAME", "deadlines").strip()
 EXCEL_FILE = os.getenv("EXCEL_FILE", "Teams-WireFrames.xlsx").strip()
 DATABASE_FILE = os.getenv("DATABASE_FILE", "peer_reviews.db").strip()
 REPORT_TIMEZONE = os.getenv("REPORT_TIMEZONE", "America/New_York").strip()
@@ -255,6 +256,151 @@ def build_office_hours_embed(now: datetime) -> discord.Embed:
 
     embed.set_footer(text="All times Eastern (ET)")
     return embed
+
+
+# ---------------------------------------------------------------------------
+# Course schedule / deadline configuration
+# ---------------------------------------------------------------------------
+# Loaded from COURSE_SCHEDULE_JSON env-var **or** from a default that matches
+# the Spring 2026 syllabus.  Each entry is:
+#   { "date": "YYYY-MM-DD", "label": "short description", "category": "..." }
+# Categories help colour-code the embed: assignment, exam, project, quiz, peer_eval
+
+_DEFAULT_COURSE_SCHEDULE: List[dict] = [
+    # Week 1
+    {"date": "2026-01-21", "label": "Topic Area selection", "category": "project"},
+    # Week 2
+    {"date": "2026-01-28", "label": "Source Summary 1 (SS1)", "category": "project"},
+    {"date": "2026-02-04", "label": "Assignment 1", "category": "assignment"},
+    # Week 3
+    {"date": "2026-02-04", "label": "Source Summary 2 (SS2)", "category": "project"},
+    # Week 4
+    {"date": "2026-02-11", "label": "Source Summary 3 (SS3)", "category": "project"},
+    {"date": "2026-02-18", "label": "Assignment 2", "category": "assignment"},
+    # Week 5
+    {"date": "2026-02-18", "label": "Source Summary 4 (SS4)", "category": "project"},
+    # Week 6
+    {"date": "2026-02-25", "label": "Wireframe & Video", "category": "project"},
+    # Week 7  (Peer Eval 1)
+    {"date": "2026-02-27", "label": "Peer Evaluation 1", "category": "peer_eval"},
+    # Week 8
+    {"date": "2026-03-03", "label": "Exam 1", "category": "exam"},
+    {"date": "2026-03-18", "label": "Source Summary 5 (SS5)", "category": "project"},
+    # Week 9 — Spring Break (no deadlines)
+    # Week 10
+    {"date": "2026-03-25", "label": "Source Summary 6 (SS6)", "category": "project"},
+    {"date": "2026-04-01", "label": "Assignment 3", "category": "assignment"},
+    # Week 11
+    {"date": "2026-04-01", "label": "Source Summary 7 (SS7)", "category": "project"},
+    # Week 12
+    {"date": "2026-04-08", "label": "Source Summary 8 (SS8)", "category": "project"},
+    {"date": "2026-04-15", "label": "Assignment 4", "category": "assignment"},
+    # Week 13
+    {"date": "2026-04-17", "label": "Draft Paper & Video", "category": "project"},
+    # Week 14
+    {"date": "2026-04-21", "label": "Exam 2", "category": "exam"},
+    # Week 15
+    {"date": "2026-05-04", "label": "Final Report & Video", "category": "project"},
+    {"date": "2026-05-05", "label": "Peer Evaluation 2", "category": "peer_eval"},
+    # Week 16
+    {"date": "2026-05-15", "label": "Poster Presentations (TBD)", "category": "project"},
+]
+
+_raw_cs = os.getenv("COURSE_SCHEDULE_JSON", "").strip()
+COURSE_SCHEDULE_DATA: List[dict] = json.loads(_raw_cs) if _raw_cs else _DEFAULT_COURSE_SCHEDULE
+
+
+@dataclass
+class Deadline:
+    date: datetime
+    label: str
+    category: str
+
+
+def _parse_course_schedule(data: List[dict]) -> List[Deadline]:
+    """Convert raw JSON/dict list into sorted Deadline objects."""
+    deadlines: List[Deadline] = []
+    for entry in data:
+        dt = datetime.strptime(entry["date"], "%Y-%m-%d").replace(tzinfo=REPORT_TZ)
+        deadlines.append(Deadline(date=dt, label=entry["label"], category=entry.get("category", "other")))
+    deadlines.sort(key=lambda d: d.date)
+    return deadlines
+
+
+COURSE_DEADLINES: List[Deadline] = _parse_course_schedule(COURSE_SCHEDULE_DATA)
+
+# Emoji prefix by category for embed readability
+_CATEGORY_EMOJI = {
+    "assignment": "\U0001f4dd",   # memo
+    "exam": "\U0001f4d6",         # open book
+    "project": "\U0001f4cb",      # clipboard
+    "quiz": "\u2753",             # question mark
+    "peer_eval": "\U0001f465",    # busts in silhouette
+}
+
+
+def get_upcoming_deadlines(now: datetime, lookahead_days: int = 7) -> List[Deadline]:
+    """Return deadlines from *today* through *lookahead_days* in the future."""
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = today + timedelta(days=lookahead_days + 1)  # inclusive of the last day
+    return [d for d in COURSE_DEADLINES if today <= d.date < cutoff]
+
+
+def build_upcoming_embed(now: datetime, lookahead_days: int = 7) -> discord.Embed:
+    """Create a rich embed showing upcoming deadlines."""
+    upcoming = get_upcoming_deadlines(now, lookahead_days)
+
+    embed = discord.Embed(
+        title="Upcoming Deadlines",
+        color=discord.Color.orange(),
+        timestamp=now,
+    )
+
+    if not upcoming:
+        embed.description = f"Nothing due in the next {lookahead_days} days."
+        embed.set_footer(text="Use /upcoming to check anytime")
+        return embed
+
+    lines: List[str] = []
+    for d in upcoming:
+        emoji = _CATEGORY_EMOJI.get(d.category, "\U0001f4cc")  # default: pushpin
+        day_diff = (d.date.date() - now.date()).days
+        if day_diff == 0:
+            when = "**TODAY**"
+        elif day_diff == 1:
+            when = "tomorrow"
+        else:
+            when = d.date.strftime("%a %b %-d")
+        lines.append(f"{emoji} {when} — {d.label}")
+
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"Showing next {lookahead_days} days • Use /upcoming to check anytime")
+    return embed
+
+
+def build_deadline_reminder_text(now: datetime) -> Optional[str]:
+    """Build a plain-text message for the daily #deadlines post.
+    Returns None if nothing is due in the next 7 days."""
+    upcoming = get_upcoming_deadlines(now, lookahead_days=7)
+    if not upcoming:
+        return None
+
+    lines: List[str] = []
+    lines.append("**Upcoming Deadlines (next 7 days)**")
+    lines.append("")
+
+    for d in upcoming:
+        emoji = _CATEGORY_EMOJI.get(d.category, "\U0001f4cc")
+        day_diff = (d.date.date() - now.date()).days
+        if day_diff == 0:
+            when = "**TODAY**"
+        elif day_diff == 1:
+            when = "**Tomorrow**"
+        else:
+            when = d.date.strftime("%A, %b %-d")
+        lines.append(f"{emoji} {when} — {d.label}")
+
+    return "\n".join(lines)
 
 
 def utcnow_iso() -> str:
@@ -913,6 +1059,8 @@ class PeerReviewBot(commands.Bot):
             daily_instructor_report.start()
         if not daily_unregistered_nudge.is_running():
             daily_unregistered_nudge.start()
+        if not daily_deadline_reminder.is_running():
+            daily_deadline_reminder.start()
 
 
 bot = PeerReviewBot()
@@ -955,6 +1103,23 @@ async def get_general_channel() -> Optional[discord.TextChannel]:
 
     for channel in guild.text_channels:
         if channel.name == GENERAL_CHANNEL_NAME:
+            return channel
+    return None
+
+
+async def get_deadlines_channel() -> Optional[discord.TextChannel]:
+    if GUILD_ID is None:
+        return None
+
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        try:
+            guild = await bot.fetch_guild(GUILD_ID)
+        except discord.DiscordException:
+            return None
+
+    for channel in guild.text_channels:
+        if channel.name == DEADLINES_CHANNEL_NAME:
             return channel
     return None
 
@@ -1110,6 +1275,29 @@ async def daily_unregistered_nudge():
     message = build_unregistered_nudge_text()
     if message is None:
         return  # Everyone is registered — nothing to post.
+
+    await channel.send(message)
+
+
+# ---------------------------------------------------------------------------
+# Daily deadline reminder  (posts to #deadlines at 08:00 by default)
+# ---------------------------------------------------------------------------
+
+@tasks.loop(time=NUDGE_TIME)
+async def daily_deadline_reminder():
+    # Skip weekends (Saturday=5, Sunday=6).
+    if datetime.now(REPORT_TZ).weekday() >= 5:
+        return
+
+    channel = await get_deadlines_channel()
+    if channel is None:
+        print(f"Deadlines channel '{DEADLINES_CHANNEL_NAME}' not found; skipping deadline reminder.")
+        return
+
+    now = datetime.now(REPORT_TZ)
+    message = build_deadline_reminder_text(now)
+    if message is None:
+        return  # Nothing due in the next 7 days.
 
     await channel.send(message)
 
@@ -1287,6 +1475,15 @@ async def send_daily_report_now(interaction: discord.Interaction):
 
     await channel.send(build_daily_report_text())
     await interaction.response.send_message("Instructor report sent.", ephemeral=True)
+
+
+@bot.tree.command(name="upcoming", description="See upcoming assignment and exam deadlines.")
+@app_commands.describe(days="How many days to look ahead (default 7)")
+async def upcoming(interaction: discord.Interaction, days: Optional[int] = 7):
+    lookahead = max(1, min(days or 7, 30))  # clamp between 1 and 30
+    now = datetime.now(REPORT_TZ)
+    embed = build_upcoming_embed(now, lookahead_days=lookahead)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="office_hours", description="See who has office hours right now and when the next sessions are.")
