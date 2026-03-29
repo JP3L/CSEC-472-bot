@@ -1,6 +1,6 @@
 # AuthBot — CSEC-472 Peer Review & Cybersecurity Training Platform
 
-A Discord bot for RIT's CSEC-472 (Authentication & Security) course that combines peer review management with an educational cybersecurity game inspired by *Papers, Please*. Students register with their RIT username, complete rubric-based peer reviews, and play a checkpoint-inspection game where every document maps to a real authentication protocol from the syllabus.
+A Discord bot for RIT's CSEC-472 (Authentication) course that combines peer review management with an educational cybersecurity game inspired by *Papers, Please*. Students register with their RIT username, complete rubric-based peer reviews, and play a checkpoint-inspection game where every document maps to a real authentication protocol from the syllabus.
 
 **Repository:** [github.com/JP3L/CSEC-472-bot](https://github.com/JP3L/CSEC-472-bot)
 
