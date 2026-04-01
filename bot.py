@@ -1078,6 +1078,8 @@ class PeerReviewBot(commands.Bot):
         print("Papers Please game database initialized.")
         if not daily_instructor_report.is_running():
             daily_instructor_report.start()
+        if not weekly_game_report.is_running():
+            weekly_game_report.start()
         if not daily_unregistered_nudge.is_running():
             daily_unregistered_nudge.start()
         if not daily_deadline_reminder.is_running():
@@ -1359,11 +1361,11 @@ async def daily_instructor_report():
 
     # Header embed
     header_embed = discord.Embed(
-        title="📋 CSEC-472 Daily Executive Brief",
+        title="📋 CSEC-472 Daily Brief",
         description=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')}",
         color=0x2ECC71,
     )
-    header_embed.set_footer(text="AuthBot • CSEC-472 Peer Review & Game System")
+    header_embed.set_footer(text="AuthBot • CSEC-472 Peer Review System")
     await channel.send(embed=header_embed)
 
     # Peer review section
@@ -1374,6 +1376,28 @@ async def daily_instructor_report():
         color=0x3498DB,
     )
     await channel.send(embed=review_embed)
+
+
+@tasks.loop(time=REPORT_TIME)
+async def weekly_game_report():
+    """Send the Papers Please game performance brief every Friday."""
+    # Only fire on Fridays (weekday 4)
+    if datetime.now(REPORT_TZ).weekday() != 4:
+        return
+
+    channel = await get_instructor_channel()
+    if channel is None:
+        print(f"Instructor channel '{INSTRUCTOR_CHANNEL_NAME}' not found.")
+        return
+
+    # Header embed
+    header_embed = discord.Embed(
+        title="🎮 CSEC-472 Weekly Agent Performance Brief",
+        description=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')}",
+        color=0x9B59B6,
+    )
+    header_embed.set_footer(text="AuthBot • Papers Please Game Analytics")
+    await channel.send(embed=header_embed)
 
     # Game performance section
     game_embed = build_game_report_embed()
@@ -1656,11 +1680,11 @@ async def send_daily_report_now(interaction: discord.Interaction):
 
     # Header embed
     header_embed = discord.Embed(
-        title="📋 CSEC-472 Daily Executive Brief",
+        title="📋 CSEC-472 Daily Brief",
         description=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')} *(manual trigger)*",
         color=0x2ECC71,
     )
-    header_embed.set_footer(text="AuthBot • CSEC-472 Peer Review & Game System")
+    header_embed.set_footer(text="AuthBot • CSEC-472 Peer Review System")
     await channel.send(embed=header_embed)
 
     # Peer review section
@@ -1671,6 +1695,34 @@ async def send_daily_report_now(interaction: discord.Interaction):
         color=0x3498DB,
     )
     await channel.send(embed=review_embed)
+
+    await interaction.followup.send("Daily report sent.", ephemeral=True)
+
+
+@bot.tree.command(name="send_weekly_report_now", description="Send the weekly game performance report immediately.")
+async def send_weekly_report_now(interaction: discord.Interaction):
+    if not is_instructor(interaction.user):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    channel = await get_instructor_channel()
+    if channel is None:
+        await interaction.response.send_message(
+            f"I could not find `#{INSTRUCTOR_CHANNEL_NAME}`.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Header embed
+    header_embed = discord.Embed(
+        title="🎮 CSEC-472 Weekly Agent Performance Brief",
+        description=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')} *(manual trigger)*",
+        color=0x9B59B6,
+    )
+    header_embed.set_footer(text="AuthBot • Papers Please Game Analytics")
+    await channel.send(embed=header_embed)
 
     # Game performance section
     game_embed = build_game_report_embed()
@@ -1685,7 +1737,7 @@ async def send_daily_report_now(interaction: discord.Interaction):
     except Exception as exc:
         print(f"[Report] Chart generation error: {exc}")
 
-    await interaction.followup.send("Instructor report sent.", ephemeral=True)
+    await interaction.followup.send("Weekly game report sent.", ephemeral=True)
 
 
 @bot.tree.command(name="upcoming", description="See upcoming assignment and exam deadlines.")
