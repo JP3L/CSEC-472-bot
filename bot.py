@@ -40,7 +40,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 GUILD_ID_RAW = os.getenv("DISCORD_GUILD_ID", "").strip()
 GUILD_ID = int(GUILD_ID_RAW) if GUILD_ID_RAW else None
-INSTRUCTOR_CHANNEL_NAME = os.getenv("INSTRUCTOR_CHANNEL_NAME", "instructors").strip()
+INSTRUCTOR_CHANNEL_NAME = os.getenv("INSTRUCTOR_CHANNEL_NAME", "bot-briefs").strip()
 DADJOKE_CHANNEL_NAME = os.getenv("DADJOKE_CHANNEL_NAME", "extracurricular").strip()
 GENERAL_CHANNEL_NAME = os.getenv("GENERAL_CHANNEL_NAME", "general").strip()
 DEADLINES_CHANNEL_NAME = os.getenv("DEADLINES_CHANNEL_NAME", "deadlines").strip()
