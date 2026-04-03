@@ -1426,8 +1426,8 @@ import re as _re
 # In-memory store for today's confirmed recommendations; flushed after daily summary.
 _pending_recommendations: List[dict] = []
 
-# Tracks recommendation proposals awaiting user confirmation.
-# Key: bot reply message ID → value: draft recommendation dict
+# Tracks recommendation proposals awaiting user confirmation in DMs.
+# Key: bot DM message ID → value: draft recommendation dict
 _unconfirmed_recommendations: Dict[int, dict] = {}
 
 # Keywords / phrases that signal a feature recommendation
@@ -1440,24 +1440,46 @@ _RECOMMENDATION_SIGNALS = [
     "let us", "let me", "allow us", "allow me", "enable",
 ]
 
-# Canned smart replies for non-recommendation mentions (randomly selected)
-_SMART_REPLIES = [
+# Keywords that signal a question or task request (not a recommendation)
+_QUESTION_SIGNALS = [
+    "what", "when", "where", "who", "how", "why", "is there", "are there",
+    "do you", "does", "tell me", "explain", "help", "show me", "?",
+]
+
+_TASK_SIGNALS = [
+    "remind", "check", "look at", "look into", "find", "search",
+    "send", "post", "run", "start", "stop", "reset", "clear",
+    "list", "count", "give me", "get me", "pull up",
+]
+
+# Canned smart replies for truly casual mentions (greetings, shoutouts, etc.)
+_CASUAL_REPLIES = [
     "I'm always listening. Well, when you @ me, at least. 👂",
     "You rang? AuthBot at your service. 🫡",
-    "I heard my name. Need something? Try `/play` if you're bored — I dare you to beat level 5.",
     "At your service! Fun fact: CERBERUS has three heads, but I still only have one brain cell dedicated to dad jokes.",
-    "Hello! If you need help, I've got `/office_hours`, `/upcoming`, `/review`, and `/play` in my toolkit.",
     "Acknowledged. If that was meant to be a compliment, I'll take it. If not... I'll still take it. 😎",
     "I'm here! Unlike expired TLS certificates, I'm always valid. Well, until someone restarts me.",
     "Did someone say AuthBot? That's me! I'm like a Kerberos KDC — I'm the trusted third party in this conversation.",
     "Ping received! My response time is better than most OAuth token refresh cycles. ⚡",
-    "Present and accounted for! Remember: something you know, something you have, something you are — and something that @mentions me.",
-    "At ease, agent. AuthBot standing by. Need a review? A game? A dad joke? I've got range.",
-    "Roger that! If you need me for something specific, try a slash command. I'm better at those than reading minds.",
     "Reporting for duty! 🛡️ Though if you're trying to social-engineer me, you'll need more than an @mention.",
     "Copy. I may be a bot, but I've got feelings. Well, `if/else` statements. Close enough.",
-    "Loud and clear! Pro tip: if you want me to actually DO something, check out my slash commands with `/`.",
 ]
+
+# Intelligent replies keyed to recognized topics/tasks
+_COMMAND_HINTS = {
+    "review": "Looking for peer reviews? Use `/review` to get your next assignment.",
+    "play": "Want to play Papers Please? Use `/play` to start a checkpoint session in your DMs!",
+    "game": "Ready for a round? Use `/play` to launch the Papers Please game. CERBERUS will be watching. 🐕‍🦺",
+    "office": "Check `/office_hours` to see who's available right now and when the next sessions are.",
+    "deadline": "Use `/upcoming` to see what's due in the next few days.",
+    "register": "Need to register? Use `/register <your_rit_username>` to link your Discord account.",
+    "score": "Your game stats are available during an active session via the 📊 Score button, or instructors can check the weekly report.",
+    "cerberus": "Ask CERBERUS about any AUTH concept with `/cerberus <topic>` — try `kerberos`, `tls`, `oauth`, `mfa`, or `deep dive <topic>` for the full breakdown.",
+    "joke": "Need a laugh? Try `/dadjoke` to drop one in #extracurricular.",
+    "help": "Here's what I can do: `/register`, `/review`, `/play`, `/cerberus`, `/upcoming`, `/office_hours`, `/dadjoke`, and `/status`. What do you need?",
+    "quit": "To end your game session, use `/quit_game`. Your stats will be saved.",
+    "report": "Instructors can trigger reports with `/send_daily_report_now` or `/send_weekly_report_now`.",
+}
 
 # Emojis accepted as confirmation
 _CONFIRM_EMOJIS = {"👍", "✅", "🆗", "💯", "🫡", "👌"}
@@ -1478,25 +1500,69 @@ def _clean_mention_text(text: str) -> str:
     return cleaned
 
 
+def _build_intelligent_reply(text: str) -> str:
+    """Analyze the mention text and build a context-appropriate reply.
+
+    Priority:
+      1. Match a known topic/command → give targeted guidance
+      2. Looks like a question → give a helpful answer
+      3. Looks like a task request → explain relevant capabilities
+      4. Fallback → casual reply
+    """
+    lower = text.lower()
+    cleaned = _re.sub(r"<@!?\d+>", "", lower).strip()
+
+    # 1. Check for known topic keywords → give targeted help
+    for keyword, hint in _COMMAND_HINTS.items():
+        if keyword in cleaned:
+            return hint
+
+    # 2. Looks like a question → give a thoughtful answer
+    if any(q in cleaned for q in _QUESTION_SIGNALS):
+        return (
+            f"Good question! I'm not sure I fully understand what you're asking, "
+            f"but here's what I can help with: peer reviews (`/review`), "
+            f"the Papers Please game (`/play`), security concepts (`/cerberus <topic>`), "
+            f"office hours (`/office_hours`), and deadlines (`/upcoming`). "
+            f"Can you be more specific?"
+        )
+
+    # 3. Looks like a task request → explain capabilities
+    if any(t in cleaned for t in _TASK_SIGNALS):
+        return (
+            f"I'd love to help! Here are my available commands:\n"
+            f"• `/register` — Link your RIT username\n"
+            f"• `/review` — Get a peer review assignment\n"
+            f"• `/play` — Launch Papers Please\n"
+            f"• `/cerberus <topic>` — Deep dive into AUTH concepts\n"
+            f"• `/upcoming` — Check deadlines\n"
+            f"• `/office_hours` — See availability\n"
+            f"Which one fits what you need?"
+        )
+
+    # 4. Truly casual mention → fun reply
+    return random.choice(_CASUAL_REPLIES)
+
+
 @bot.event
 async def on_message(message: discord.Message):
-    """Handle @AuthBot mentions: detect recommendations or reply smartly."""
+    """Handle @AuthBot mentions: detect recommendations, handle DM confirmations,
+    or reply intelligently."""
     # Ignore messages from self
     if message.author.id == bot.user.id:
         return
 
-    # --- Check if this is a reply to an unconfirmed recommendation ---
-    if (message.reference
+    # --- Check if this is a DM reply to an unconfirmed recommendation ---
+    if (isinstance(message.channel, discord.DMChannel)
+            and message.reference
             and message.reference.message_id in _unconfirmed_recommendations):
         draft = _unconfirmed_recommendations[message.reference.message_id]
-        # Only the original author can confirm/correct
         if message.author.id == draft["author_id"]:
             reply_lower = message.content.strip().lower()
             # Check for affirmative replies
             if reply_lower in ("yes", "y", "yep", "yeah", "correct", "confirmed",
                                "confirm", "looks good", "lgtm", "approved", "ok",
                                "okay", "sure", "that's right", "thats right", "right"):
-                # Confirmed — store the recommendation
                 _pending_recommendations.append(draft)
                 del _unconfirmed_recommendations[message.reference.message_id]
                 await message.reply(
@@ -1505,7 +1571,6 @@ async def on_message(message: discord.Message):
                 )
             elif reply_lower in ("no", "n", "nope", "wrong", "cancel", "nevermind",
                                  "never mind", "nvm", "discard", "delete", "remove"):
-                # Rejected — discard
                 del _unconfirmed_recommendations[message.reference.message_id]
                 await message.reply("🗑️ Recommendation discarded. No worries!")
             else:
@@ -1514,16 +1579,15 @@ async def on_message(message: discord.Message):
                 draft["text"] = corrected
                 bot_reply = await message.reply(
                     f"📝 **Updated recommendation:**\n> {corrected}\n\n"
-                    f"Is this correct? React with 👍 or reply **yes** to confirm, "
+                    f"Is this correct? Reply **yes** to confirm, "
                     f"or reply with another correction."
                 )
-                # Move the tracking to the new bot reply
                 del _unconfirmed_recommendations[message.reference.message_id]
                 _unconfirmed_recommendations[bot_reply.id] = draft
         await bot.process_commands(message)
         return
 
-    # --- Only process messages that mention the bot ---
+    # --- Only process guild/channel messages that mention the bot ---
     if bot.user not in message.mentions:
         await bot.process_commands(message)
         return
@@ -1542,22 +1606,32 @@ async def on_message(message: discord.Message):
             "timestamp": datetime.now(REPORT_TZ).isoformat(),
         }
 
-        # Send proposal and ask for confirmation
-        bot_reply = await message.reply(
-            f"💡 **RECOMMENDATION DETECTED:**\n> {cleaned}\n\n"
-            f"Is this correct, {author.display_name}? "
-            f"React with 👍 or reply **yes** to confirm. "
-            f"Reply with a correction to revise, or react with 👎 to discard."
+        # Acknowledge publicly in channel (brief)
+        await message.reply(
+            f"💡 Recommendation detected! Check your DMs, {author.display_name} — "
+            f"I've sent it there for you to review and confirm."
         )
-        # Add reaction shortcuts to the bot's reply
-        await bot_reply.add_reaction("👍")
-        await bot_reply.add_reaction("👎")
 
-        # Track this proposal
-        _unconfirmed_recommendations[bot_reply.id] = draft
+        # Send the full confirmation flow via DM
+        try:
+            dm_channel = await author.create_dm()
+            bot_dm = await dm_channel.send(
+                f"💡 **RECOMMENDATION DETECTED** (from #{draft['channel']}):\n"
+                f"> {cleaned}\n\n"
+                f"Is this correct? Reply **yes** to confirm, type a correction to revise, "
+                f"or reply **cancel** to discard."
+            )
+            _unconfirmed_recommendations[bot_dm.id] = draft
+        except discord.Forbidden:
+            # Can't DM user — fall back to storing directly
+            _pending_recommendations.append(draft)
+            await message.channel.send(
+                f"⚠️ I couldn't DM you, {author.display_name}, so I've logged the "
+                f"recommendation as-is. It will appear in the next daily summary."
+            )
     else:
-        # Smart reply — pick a random contextual response
-        reply = random.choice(_SMART_REPLIES)
+        # Not a recommendation — analyze and reply intelligently
+        reply = _build_intelligent_reply(text)
         await message.reply(reply)
 
     await bot.process_commands(message)
@@ -1565,8 +1639,7 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
-    """Handle reaction-based confirmation/rejection of recommendations."""
-    # Ignore bot's own reactions
+    """Handle reaction-based confirmation/rejection of recommendations in DMs."""
     if user.id == bot.user.id:
         return
 
@@ -1575,8 +1648,6 @@ async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
         return
 
     draft = _unconfirmed_recommendations[msg_id]
-
-    # Only the original author can confirm/reject
     if user.id != draft["author_id"]:
         return
 
