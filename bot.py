@@ -61,6 +61,7 @@ if not os.path.exists(EXCEL_FILE):
 GUILD_OBJECT = discord.Object(id=GUILD_ID) if GUILD_ID else None
 REPORT_TZ = ZoneInfo(REPORT_TIMEZONE)
 REPORT_TIME = time(hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MINUTE, tzinfo=REPORT_TZ)
+RECOMMENDATIONS_TIME = time(hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MINUTE + 1, tzinfo=REPORT_TZ)
 NUDGE_TIME = time(hour=NUDGE_HOUR, minute=NUDGE_MINUTE, tzinfo=REPORT_TZ)
 
 # ---------------------------------------------------------------------------
@@ -1060,6 +1061,7 @@ class StartReviewView(discord.ui.View):
 class PeerReviewBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        intents.message_content = True  # Required to read @mention message text
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self) -> None:
@@ -1080,6 +1082,8 @@ class PeerReviewBot(commands.Bot):
             daily_instructor_report.start()
         if not weekly_game_report.is_running():
             weekly_game_report.start()
+        if not daily_recommendations_summary.is_running():
+            daily_recommendations_summary.start()
         if not daily_unregistered_nudge.is_running():
             daily_unregistered_nudge.start()
         if not daily_deadline_reminder.is_running():
@@ -1411,6 +1415,224 @@ async def weekly_game_report():
             await channel.send(file=chart_file)
     except Exception as exc:
         print(f"[Report] Chart generation error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# @Mention handler — recommendation detection & smart replies
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+# In-memory store for today's confirmed recommendations; flushed after daily summary.
+_pending_recommendations: List[dict] = []
+
+# Tracks recommendation proposals awaiting user confirmation.
+# Key: bot reply message ID → value: draft recommendation dict
+_unconfirmed_recommendations: Dict[int, dict] = {}
+
+# Keywords / phrases that signal a feature recommendation
+_RECOMMENDATION_SIGNALS = [
+    "should", "could you", "can you", "would be nice", "it would be",
+    "add a", "add an", "feature", "idea", "suggestion", "suggest",
+    "recommend", "request", "please make", "you should", "how about",
+    "what if", "wish", "need a", "needs a", "improve", "upgrade",
+    "update", "change", "fix", "implement", "build", "create",
+    "let us", "let me", "allow us", "allow me", "enable",
+]
+
+# Canned smart replies for non-recommendation mentions (randomly selected)
+_SMART_REPLIES = [
+    "I'm always listening. Well, when you @ me, at least. 👂",
+    "You rang? AuthBot at your service. 🫡",
+    "I heard my name. Need something? Try `/play` if you're bored — I dare you to beat level 5.",
+    "At your service! Fun fact: CERBERUS has three heads, but I still only have one brain cell dedicated to dad jokes.",
+    "Hello! If you need help, I've got `/office_hours`, `/upcoming`, `/review`, and `/play` in my toolkit.",
+    "Acknowledged. If that was meant to be a compliment, I'll take it. If not... I'll still take it. 😎",
+    "I'm here! Unlike expired TLS certificates, I'm always valid. Well, until someone restarts me.",
+    "Did someone say AuthBot? That's me! I'm like a Kerberos KDC — I'm the trusted third party in this conversation.",
+    "Ping received! My response time is better than most OAuth token refresh cycles. ⚡",
+    "Present and accounted for! Remember: something you know, something you have, something you are — and something that @mentions me.",
+    "At ease, agent. AuthBot standing by. Need a review? A game? A dad joke? I've got range.",
+    "Roger that! If you need me for something specific, try a slash command. I'm better at those than reading minds.",
+    "Reporting for duty! 🛡️ Though if you're trying to social-engineer me, you'll need more than an @mention.",
+    "Copy. I may be a bot, but I've got feelings. Well, `if/else` statements. Close enough.",
+    "Loud and clear! Pro tip: if you want me to actually DO something, check out my slash commands with `/`.",
+]
+
+# Emojis accepted as confirmation
+_CONFIRM_EMOJIS = {"👍", "✅", "🆗", "💯", "🫡", "👌"}
+_REJECT_EMOJIS = {"👎", "❌", "🚫"}
+
+
+def _is_recommendation(text: str) -> bool:
+    """Return True if the message text looks like a feature recommendation."""
+    lower = text.lower()
+    return any(signal in lower for signal in _RECOMMENDATION_SIGNALS)
+
+
+def _clean_mention_text(text: str) -> str:
+    """Strip @mentions and clean up the text."""
+    cleaned = _re.sub(r"<@!?\d+>", "", text).strip()
+    if len(cleaned) > 300:
+        cleaned = cleaned[:297] + "..."
+    return cleaned
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Handle @AuthBot mentions: detect recommendations or reply smartly."""
+    # Ignore messages from self
+    if message.author.id == bot.user.id:
+        return
+
+    # --- Check if this is a reply to an unconfirmed recommendation ---
+    if (message.reference
+            and message.reference.message_id in _unconfirmed_recommendations):
+        draft = _unconfirmed_recommendations[message.reference.message_id]
+        # Only the original author can confirm/correct
+        if message.author.id == draft["author_id"]:
+            reply_lower = message.content.strip().lower()
+            # Check for affirmative replies
+            if reply_lower in ("yes", "y", "yep", "yeah", "correct", "confirmed",
+                               "confirm", "looks good", "lgtm", "approved", "ok",
+                               "okay", "sure", "that's right", "thats right", "right"):
+                # Confirmed — store the recommendation
+                _pending_recommendations.append(draft)
+                del _unconfirmed_recommendations[message.reference.message_id]
+                await message.reply(
+                    f"✅ **Recommendation confirmed and logged!** "
+                    f"It will appear in the next daily summary in `#{INSTRUCTOR_CHANNEL_NAME}`."
+                )
+            elif reply_lower in ("no", "n", "nope", "wrong", "cancel", "nevermind",
+                                 "never mind", "nvm", "discard", "delete", "remove"):
+                # Rejected — discard
+                del _unconfirmed_recommendations[message.reference.message_id]
+                await message.reply("🗑️ Recommendation discarded. No worries!")
+            else:
+                # Treat as a correction — update the summary text
+                corrected = _clean_mention_text(message.content)
+                draft["text"] = corrected
+                bot_reply = await message.reply(
+                    f"📝 **Updated recommendation:**\n> {corrected}\n\n"
+                    f"Is this correct? React with 👍 or reply **yes** to confirm, "
+                    f"or reply with another correction."
+                )
+                # Move the tracking to the new bot reply
+                del _unconfirmed_recommendations[message.reference.message_id]
+                _unconfirmed_recommendations[bot_reply.id] = draft
+        await bot.process_commands(message)
+        return
+
+    # --- Only process messages that mention the bot ---
+    if bot.user not in message.mentions:
+        await bot.process_commands(message)
+        return
+
+    text = message.content
+    author = message.author
+
+    if _is_recommendation(text):
+        cleaned = _clean_mention_text(text)
+
+        draft = {
+            "author": str(author),
+            "author_id": author.id,
+            "channel": message.channel.name if hasattr(message.channel, "name") else "DM",
+            "text": cleaned,
+            "timestamp": datetime.now(REPORT_TZ).isoformat(),
+        }
+
+        # Send proposal and ask for confirmation
+        bot_reply = await message.reply(
+            f"💡 **RECOMMENDATION DETECTED:**\n> {cleaned}\n\n"
+            f"Is this correct, {author.display_name}? "
+            f"React with 👍 or reply **yes** to confirm. "
+            f"Reply with a correction to revise, or react with 👎 to discard."
+        )
+        # Add reaction shortcuts to the bot's reply
+        await bot_reply.add_reaction("👍")
+        await bot_reply.add_reaction("👎")
+
+        # Track this proposal
+        _unconfirmed_recommendations[bot_reply.id] = draft
+    else:
+        # Smart reply — pick a random contextual response
+        reply = random.choice(_SMART_REPLIES)
+        await message.reply(reply)
+
+    await bot.process_commands(message)
+
+
+@bot.event
+async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
+    """Handle reaction-based confirmation/rejection of recommendations."""
+    # Ignore bot's own reactions
+    if user.id == bot.user.id:
+        return
+
+    msg_id = reaction.message.id
+    if msg_id not in _unconfirmed_recommendations:
+        return
+
+    draft = _unconfirmed_recommendations[msg_id]
+
+    # Only the original author can confirm/reject
+    if user.id != draft["author_id"]:
+        return
+
+    emoji = str(reaction.emoji)
+
+    if emoji in _CONFIRM_EMOJIS:
+        _pending_recommendations.append(draft)
+        del _unconfirmed_recommendations[msg_id]
+        await reaction.message.reply(
+            f"✅ **Recommendation confirmed and logged!** "
+            f"It will appear in the next daily summary in `#{INSTRUCTOR_CHANNEL_NAME}`."
+        )
+    elif emoji in _REJECT_EMOJIS:
+        del _unconfirmed_recommendations[msg_id]
+        await reaction.message.reply("🗑️ Recommendation discarded. No worries!")
+
+
+@tasks.loop(time=RECOMMENDATIONS_TIME)
+async def daily_recommendations_summary():
+    """Post accumulated recommendations to #bot-briefs at 18:01 daily."""
+    # Skip weekends
+    if datetime.now(REPORT_TZ).weekday() >= 5:
+        return
+
+    channel = await get_instructor_channel()
+    if channel is None:
+        return
+
+    if not _pending_recommendations:
+        # No recommendations today — skip silently
+        return
+
+    # Build the summary embed
+    embed = discord.Embed(
+        title="💡 Daily Recommendations Summary",
+        description=(
+            f"**{len(_pending_recommendations)}** recommendation(s) received today "
+            f"via @AuthBot mentions."
+        ),
+        color=0xF39C12,  # Amber
+    )
+    embed.set_footer(
+        text=f"Generated: {datetime.now(REPORT_TZ).strftime('%A, %B %d %Y • %H:%M %Z')}"
+    )
+
+    for i, rec in enumerate(_pending_recommendations[:25], start=1):  # Cap at 25
+        embed.add_field(
+            name=f"#{i} — {rec['author']} in #{rec['channel']}",
+            value=rec["text"][:1024],  # Discord field value limit
+            inline=False,
+        )
+
+    await channel.send(embed=embed)
+
+    # Flush the day's recommendations
+    _pending_recommendations.clear()
 
 
 # ---------------------------------------------------------------------------
